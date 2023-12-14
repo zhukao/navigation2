@@ -19,6 +19,7 @@
 #include <utility>
 #include <limits>
 
+#include "rclcpp/logging.hpp"
 #include "lifecycle_msgs/msg/state.hpp"
 #include "nav2_core/exceptions.hpp"
 #include "nav_2d_utils/conversions.hpp"
@@ -414,6 +415,21 @@ void ControllerServer::computeControl()
 
       if (isGoalReached()) {
         RCLCPP_INFO(get_logger(), "Reached the goal!");
+        {
+          geometry_msgs::msg::PoseStamped pose;
+          if (getRobotPose(pose)) {
+            RCLCPP_INFO_STREAM(
+              rclcpp::get_logger("ControllerServer"),
+              "current robot pose "
+              << ", frame_id: " << pose.header.frame_id
+              <<", ts: " << pose.header.stamp.sec << ", " << pose.header.stamp.nanosec
+              << "\n position(xyz): " << pose.pose.position.x << ", " << pose.pose.position.y << ", " << pose.pose.position.z
+              << "\n orientation(wxyz): " << pose.pose.orientation.w << ", "
+              << pose.pose.orientation.x << ", " << pose.pose.orientation.y
+              << ", " << pose.pose.orientation.z
+              );
+          }
+        }
         break;
       }
 
@@ -596,6 +612,16 @@ bool ControllerServer::isGoalReached()
     return false;
   }
 
+  // RCLCPP_INFO_STREAM(
+  //   rclcpp::get_logger("ControllerServer"),
+  //   "current robot pose "
+  //   << ", frame_id: " << pose.header.frame_id
+  //   <<", ts: " << pose.header.stamp.sec << ", " << pose.header.stamp.nanosec
+  //   << "\n position(xyz): " << pose.pose.position.x << ", " << pose.pose.position.y << ", " << pose.pose.position.z
+  //   << "\n orientation(xyzw): " << pose.pose.orientation.x << ", " << pose.pose.orientation.y
+  //   << ", " << pose.pose.orientation.z << ", " << pose.pose.orientation.w
+  //   );
+
   nav_2d_msgs::msg::Twist2D twist = getThresholdedTwist(odom_sub_->getTwist());
   geometry_msgs::msg::Twist velocity = nav_2d_utils::twist2Dto3D(twist);
 
@@ -604,6 +630,10 @@ bool ControllerServer::isGoalReached()
   nav_2d_utils::transformPose(
     costmap_ros_->getTfBuffer(), costmap_ros_->getGlobalFrameID(),
     end_pose_, transformed_end_pose, tolerance);
+
+
+  // printf("%s, %s, %s\n", __FILE__, __DATE__, __TIME__);
+  // RCLCPP_INFO_STREAM(rclcpp::get_logger("ControllerServer"), "check isGoalReached");
 
   return goal_checkers_[current_goal_checker_]->isGoalReached(
     pose.pose, transformed_end_pose.pose,

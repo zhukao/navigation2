@@ -18,6 +18,7 @@
 #include <memory>
 #include <limits>
 #include "nav2_bt_navigator/navigators/navigate_to_pose.hpp"
+#include "tf2/utils.h"
 
 namespace nav2_bt_navigator
 {
@@ -210,10 +211,33 @@ NavigateToPoseNavigator::initializeGoalPose(ActionT::Goal::ConstSharedPtr goal)
     feedback_utils_.global_frame, feedback_utils_.robot_frame,
     feedback_utils_.transform_tolerance);
 
+  // RCLCPP_INFO(
+  //   logger_, "Begin navigating from current location (%.2f, %.2f) to (%.2f, %.2f)",
+  //   current_pose.pose.position.x, current_pose.pose.position.y,
+  //   goal->pose.pose.position.x, goal->pose.pose.position.y);
+
   RCLCPP_INFO(
-    logger_, "Begin navigating from current location (%.2f, %.2f) to (%.2f, %.2f)",
-    current_pose.pose.position.x, current_pose.pose.position.y,
-    goal->pose.pose.position.x, goal->pose.pose.position.y);
+    logger_, "Begin navigating from current location (%s) (xyz)(%.2f, %.2f, %.2f) (wxyz)(%.2f, %.2f, %.2f, %.2f) to (%s) (%.2f, %.2f, %.2f) (%.2f, %.2f, %.2f, %.2f)",
+    current_pose.header.frame_id.c_str(),
+    current_pose.pose.position.x, current_pose.pose.position.y, current_pose.pose.position.z,
+    current_pose.pose.orientation.w, current_pose.pose.orientation.x, current_pose.pose.orientation.y, current_pose.pose.orientation.z,
+    goal->pose.header.frame_id.c_str(),
+    goal->pose.pose.position.x, goal->pose.pose.position.y, goal->pose.pose.position.z,
+    goal->pose.pose.orientation.w, goal->pose.pose.orientation.x, goal->pose.pose.orientation.y, goal->pose.pose.orientation.z
+    );
+
+  {
+    double yaw, pitch, roll;
+    tf2::getEulerYPR(current_pose.pose.orientation, yaw, pitch, roll);
+    RCLCPP_INFO_STREAM(logger_,
+      "current_pose yaw: " << yaw << ", pitch: " << pitch << ", roll: " << roll);
+  }
+  {
+    double yaw, pitch, roll;
+    tf2::getEulerYPR(goal->pose.pose.orientation, yaw, pitch, roll);
+    RCLCPP_INFO_STREAM(logger_,
+      "goal yaw: " << yaw << ", pitch: " << pitch << ", roll: " << roll);
+  }
 
   // Reset state for new action feedback
   start_time_ = clock_->now();
@@ -227,6 +251,13 @@ NavigateToPoseNavigator::initializeGoalPose(ActionT::Goal::ConstSharedPtr goal)
 void
 NavigateToPoseNavigator::onGoalPoseReceived(const geometry_msgs::msg::PoseStamped::SharedPtr pose)
 {
+  // RCLCPP_INFO(
+  //   logger_, "onGoalPoseReceived (%s) (%.2f, %.2f, %.2f) (%.2f, %.2f, %.2f, %.2f)",
+  //   pose->.header.frame_id.c_str(),
+  //   pose->.pose.position.x, pose->.pose.position.y, pose->.pose.position.z,
+  //   pose->.pose.orientation.x, pose->.pose.orientation.y, pose->.pose.orientation.z, pose->.pose.orientation.w
+  //   );
+
   ActionT::Goal goal;
   goal.pose = *pose;
   self_client_->async_send_goal(goal);

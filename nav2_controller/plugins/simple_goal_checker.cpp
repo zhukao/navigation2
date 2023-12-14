@@ -46,6 +46,8 @@
 #include "tf2/utils.h"
 #pragma GCC diagnostic pop
 
+#include "rclcpp/logging.hpp"
+
 using rcl_interfaces::msg::ParameterType;
 using std::placeholders::_1;
 
@@ -99,6 +101,17 @@ bool SimpleGoalChecker::isGoalReached(
   const geometry_msgs::msg::Pose & query_pose, const geometry_msgs::msg::Pose & goal_pose,
   const geometry_msgs::msg::Twist &)
 {
+  // RCLCPP_INFO_STREAM(
+  //   rclcpp::get_logger("SimpleGoalChecker"),
+  //   "SimpleGoalChecker: "
+  //   << ", check_xy_: " << check_xy_ << ", "
+  //   << "\n xy_goal_tolerance_: " << xy_goal_tolerance_ << ", "
+  //   << "yaw_goal_tolerance_: " << yaw_goal_tolerance_ << ", "
+  //   << "xy_goal_tolerance_sq_: " << xy_goal_tolerance_sq_ << ", "
+  //   << "\n goal_pose: " << ", " << goal_pose.position.x << ", " << goal_pose.position.y << ", "
+  //   << "\n query_pose: " << query_pose.position.x << ", " << query_pose.position.y);
+
+
   if (check_xy_) {
     double dx = query_pose.position.x - goal_pose.position.x,
       dy = query_pose.position.y - goal_pose.position.y;
@@ -114,6 +127,14 @@ bool SimpleGoalChecker::isGoalReached(
   double dyaw = angles::shortest_angular_distance(
     tf2::getYaw(query_pose.orientation),
     tf2::getYaw(goal_pose.orientation));
+
+  RCLCPP_INFO_STREAM(
+    rclcpp::get_logger("SimpleGoalChecker"),
+    "SimpleGoalChecker"
+    << ", dyaw: " << dyaw
+    << "\n goal_pose.orientation: " << tf2::getYaw(goal_pose.orientation)
+    << "\n query_pose.orientation: " << tf2::getYaw(query_pose.orientation));
+
   return fabs(dyaw) < yaw_goal_tolerance_;
 }
 

@@ -597,9 +597,31 @@ Costmap2DROS::resetLayers()
 bool
 Costmap2DROS::getRobotPose(geometry_msgs::msg::PoseStamped & global_pose)
 {
-  return nav2_util::getCurrentPose(
+// bool getCurrentPose(
+//   geometry_msgs::msg::PoseStamped & global_pose,
+//   tf2_ros::Buffer & tf_buffer, const std::string global_frame,
+//   const std::string robot_frame, const double transform_timeout,
+//   const rclcpp::Time stamp)
+
+  bool ret = nav2_util::getCurrentPose(
     global_pose, *tf_buffer_,
     global_frame_, robot_base_frame_, transform_tolerance_);
+
+  // RCLCPP_INFO_STREAM(
+  //   rclcpp::get_logger("Costmap2DROS"),
+  //   "get robot pose"
+  //   << ", global_frame_: " << global_frame_
+  //   << ", robot_base_frame_: " << robot_base_frame_
+  //   << ", transform_tolerance_: " << transform_tolerance_
+  //   << "\n pose frame_id: " << global_pose.header.frame_id
+  //   <<", ts: " << global_pose.header.stamp.sec << ", " << global_pose.header.stamp.nanosec
+  //   << "\n position(xyz): " << global_pose.pose.position.x << ", " << global_pose.pose.position.y << ", " << global_pose.pose.position.z
+  //   << "\n orientation(xyzw): " << global_pose.pose.orientation.x << ", " << global_pose.pose.orientation.y
+  //   << ", " << global_pose.pose.orientation.z << ", " << global_pose.pose.orientation.w
+  //   );
+
+
+  return ret;
 }
 
 bool
