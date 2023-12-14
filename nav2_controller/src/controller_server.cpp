@@ -391,6 +391,10 @@ void ControllerServer::computeControl()
     last_valid_cmd_time_ = now();
     rclcpp::WallRate loop_rate(controller_frequency_);
     while (rclcpp::ok()) {
+      RCLCPP_INFO(
+        get_logger(), "Control loop %.2fms",
+        1000.0/controller_frequency_);
+
       if (action_server_ == nullptr || !action_server_->is_server_active()) {
         RCLCPP_DEBUG(get_logger(), "Action server unavailable or inactive. Stopping.");
         return;
@@ -549,6 +553,8 @@ void ControllerServer::computeAndPublishVelocity()
     nav2_util::geometry_utils::calculate_path_length(current_path_, find_closest_pose_idx());
   action_server_->publish_feedback(feedback);
 
+  RCLCPP_INFO(get_logger(), "distance_to_goal %.2f", feedback->distance_to_goal);
+
   RCLCPP_DEBUG(get_logger(), "Publishing velocity at time %.2f", now().seconds());
   publishVelocity(cmd_vel_2d);
 }
@@ -586,6 +592,12 @@ void ControllerServer::publishVelocity(const geometry_msgs::msg::TwistStamped & 
 {
   auto cmd_vel = std::make_unique<geometry_msgs::msg::Twist>(velocity.twist);
   if (vel_publisher_->is_activated() && vel_publisher_->get_subscription_count() > 0) {
+    RCLCPP_INFO_STREAM(
+      get_logger(),
+      "cmd_vel linear x: " << cmd_vel->linear.x << ", y: " << cmd_vel->angular.y
+      << ", angular x: " << cmd_vel->angular.x << ", y: " << cmd_vel->angular.y << ", z: " << cmd_vel->angular.z
+      );
+    
     vel_publisher_->publish(std::move(cmd_vel));
   }
 }

@@ -101,16 +101,21 @@ bool SimpleGoalChecker::isGoalReached(
   const geometry_msgs::msg::Pose & query_pose, const geometry_msgs::msg::Pose & goal_pose,
   const geometry_msgs::msg::Twist &)
 {
-  // RCLCPP_INFO_STREAM(
-  //   rclcpp::get_logger("SimpleGoalChecker"),
-  //   "SimpleGoalChecker: "
-  //   << ", check_xy_: " << check_xy_ << ", "
-  //   << "\n xy_goal_tolerance_: " << xy_goal_tolerance_ << ", "
-  //   << "yaw_goal_tolerance_: " << yaw_goal_tolerance_ << ", "
-  //   << "xy_goal_tolerance_sq_: " << xy_goal_tolerance_sq_ << ", "
-  //   << "\n goal_pose: " << ", " << goal_pose.position.x << ", " << goal_pose.position.y << ", "
-  //   << "\n query_pose: " << query_pose.position.x << ", " << query_pose.position.y);
+  {
+    double dx = query_pose.position.x - goal_pose.position.x,
+      dy = query_pose.position.y - goal_pose.position.y;
+    RCLCPP_INFO_STREAM(
+      rclcpp::get_logger("SimpleGoalChecker"),
+      "SimpleGoalChecker: "
+      << ", check_xy_: " << check_xy_ << ", "
+      << "\n xy_goal_tolerance_: " << xy_goal_tolerance_ << ", "
+      << "yaw_goal_tolerance_: " << yaw_goal_tolerance_ << ", "
+      << "\n dx&dy: " << dx * dx + dy * dy << ", dx: " << dx << ", dy: " << dy << ", "
+      << "xy_goal_tolerance_sq_: " << xy_goal_tolerance_sq_ << ", "
+      << "\n goal_pose: " << ", " << goal_pose.position.x << ", " << goal_pose.position.y << ", "
+      << "\n query_pose: " << query_pose.position.x << ", " << query_pose.position.y);
 
+  }
 
   if (check_xy_) {
     double dx = query_pose.position.x - goal_pose.position.x,
