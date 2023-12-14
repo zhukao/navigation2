@@ -39,6 +39,13 @@ amcl:
     z_short: 0.05
     scan_topic: scan
 
+    # Initial Pose
+    set_initial_pose: True
+    initial_pose.x: 0.0
+    initial_pose.y: 0.0
+    initial_pose.z: 0.0
+    initial_pose.yaw: 0.0
+
 bt_navigator:
   ros__parameters:
     use_sim_time: True
@@ -163,7 +170,7 @@ controller_server:
       linear_granularity: 0.05
       angular_granularity: 0.025
       transform_tolerance: 0.2
-      xy_goal_tolerance: 0.25
+      xy_goal_tolerance: 0.05
       trans_stopped_velocity: 0.25
       short_circuit_trajectory_evaluation: True
       stateful: True
