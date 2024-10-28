@@ -26,6 +26,7 @@
 #include "nav2_util/node_utils.hpp"
 #include "nav2_util/geometry_utils.hpp"
 #include "nav2_controller/controller_server.hpp"
+#include "angles/angles.h"
 
 using namespace std::chrono_literals;
 using rcl_interfaces::msg::ParameterType;
@@ -64,6 +65,54 @@ ControllerServer::ControllerServer(const rclcpp::NodeOptions & options)
   // The costmap node is used in the implementation of the controller
   costmap_ros_ = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
     "local_costmap", std::string{get_namespace()}, "local_costmap");
+    
+  dynamic_obstacle_markers_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
+    pub_dynamic_obstacle_markers_topic_name_,
+    rclcpp::QoS(10));
+    
+  // https://docs.ros2.org/galactic/api/visualization_msgs/msg/Marker.html
+  marker_.ns = "CUBE";
+  marker_.id = 0;
+  // Set the marker type.
+  marker_.type = visualization_msgs::msg::Marker::CUBE;
+  // Set the marker action.  Options are ADD DELETE DELETEALL
+  marker_.action = visualization_msgs::msg::Marker::ADD;
+
+  // Marker group position and orientation
+  marker_.pose.position.x = 0;
+  marker_.pose.position.y = 0;
+  marker_.pose.position.z = 0;
+  marker_.pose.orientation.x = 0.0;
+  marker_.pose.orientation.y = 0.0;
+  marker_.pose.orientation.z = 0.0;
+  marker_.pose.orientation.w = 1.0;
+  
+  marker_.color.r = 0.0;
+  marker_.color.g = 1.0;
+  marker_.color.b = 0.0;
+  marker_.color.a = 1.0;
+
+  marker_.scale.x = 0.1;
+  marker_.scale.y = 0.1;
+  marker_.scale.z = 0.01;
+
+  marker_.lifetime = builtin_interfaces::msg::Duration();  // 0 - unlimited
+  // marker_.lifetime.sec = 5.0;
+  // marker_.lifetime.nanosec = 0.0;
+  
+  ClearMarker();
+}
+
+void ControllerServer::ClearMarker() {
+  if (dynamic_obstacle_markers_pub_) {
+    visualization_msgs::msg::MarkerArray marker_array_clear;
+    auto marker = marker_;
+    marker.id = 0;
+    marker.ns = "CUBE";
+    marker.action = visualization_msgs::msg::Marker::DELETEALL;
+    marker_array_clear.markers.push_back(marker);
+    dynamic_obstacle_markers_pub_->publish(std::move(marker_array_clear));
+  }
 }
 
 ControllerServer::~ControllerServer()
@@ -209,8 +258,25 @@ ControllerServer::on_configure(const rclcpp_lifecycle::State & /*state*/)
     speed_limit_topic, rclcpp::QoS(10),
     std::bind(&ControllerServer::speedLimitCallback, this, std::placeholders::_1));
 
+  global_path_sub_ = create_subscription<nav_msgs::msg::Path>(
+    global_path_topic_, rclcpp::QoS(10),
+    std::bind(&ControllerServer::GlobalPathCallback, this, std::placeholders::_1));
+    
+  tf_buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
+  transform_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
+
   return nav2_util::CallbackReturn::SUCCESS;
 }
+
+void ControllerServer::GlobalPathCallback(const nav_msgs::msg::Path::SharedPtr msg) {
+  RCLCPP_INFO(get_logger(), "Received global path, ts: %d.%d",
+    msg->header.stamp.sec, msg->header.stamp.nanosec);
+
+  // std::lock_guard<std::mutex> lock(global_path_mutex_);
+  // recved_global_path_ = *msg;
+  // last_recved_global_path_sec_ = recved_global_path_.header.stamp.sec;
+}
+
 
 nav2_util::CallbackReturn
 ControllerServer::on_activate(const rclcpp_lifecycle::State & /*state*/)
@@ -357,6 +423,7 @@ void ControllerServer::computeControl()
   std::lock_guard<std::mutex> lock(dynamic_params_lock_);
 
   RCLCPP_INFO(get_logger(), "Received a goal, begin computing control effort.");
+  auto start_time = this->now();
 
   try {
     std::string c_name = action_server_->get_current_goal()->controller_id;
@@ -379,6 +446,7 @@ void ControllerServer::computeControl()
 
     setPlannerPath(action_server_->get_current_goal()->path);
     progress_checker_->reset();
+    failed_to_make_progress_count_ = 0;
 
     last_valid_cmd_time_ = now();
     rclcpp::WallRate loop_rate(controller_frequency_);
@@ -403,6 +471,38 @@ void ControllerServer::computeControl()
 
       updateGlobalPath();
 
+      {
+        std::unique_lock<std::mutex> lock(manual_action_mutex_);
+        if (en_precontrol_) {
+          RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000, "en precontrol_");
+          if (is_precontrolling_) {
+            RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000, "pre controlling is running");
+            rclcpp::Rate sleep_rate(20);
+            sleep_rate.sleep();
+            continue;
+          } else {
+            RCLCPP_WARN(get_logger(), "create task");
+            if (manual_action_thread_ && manual_action_thread_->joinable()) {
+              RCLCPP_WARN(get_logger(), "waiting for manual action thread to finish");
+              manual_action_thread_->join();
+              manual_action_thread_.reset();
+              RCLCPP_WARN(get_logger(), "manual action thread is exited");
+            }
+            is_precontrolling_ = true;
+            manual_action_thread_ = std::make_shared<std::thread>([this]() {
+              RCLCPP_WARN(get_logger(), "task start");
+              RotateAndMove(3.1415 / 180.0 * 10.0, 0.3);
+              ClearMarker();
+              is_precontrolling_ = false;
+              en_precontrol_ = false;
+              RCLCPP_WARN(get_logger(), "task done");
+            });
+          }
+          continue;
+        }
+
+      }
+
       computeAndPublishVelocity();
 
       if (isGoalReached()) {
@@ -419,13 +519,22 @@ void ControllerServer::computeControl()
   } catch (nav2_core::PlannerException & e) {
     RCLCPP_ERROR(this->get_logger(), "%s", e.what());
     publishZeroVelocity();
+    RCLCPP_WARN(get_logger(), "action_server_->terminate_current");
     action_server_->terminate_current();
+    
+    RCLCPP_WARN(get_logger(), "computeControl done, time cost: %.2f sec",
+      (this->now() - start_time).seconds());
+
     return;
   } catch (std::exception & e) {
     RCLCPP_ERROR(this->get_logger(), "%s", e.what());
     publishZeroVelocity();
     std::shared_ptr<Action::Result> result = std::make_shared<Action::Result>();
+    RCLCPP_WARN(get_logger(), "action_server_->terminate_current with result");
     action_server_->terminate_current(result);
+    RCLCPP_WARN(get_logger(), "computeControl done, time cost: %.2f sec",
+      (this->now() - start_time).seconds());
+
     return;
   }
 
@@ -435,6 +544,10 @@ void ControllerServer::computeControl()
 
   // TODO(orduno) #861 Handle a pending preemption and set controller name
   action_server_->succeeded_current();
+
+  RCLCPP_WARN(get_logger(), "computeControl done, time cost: %.2f sec",
+    (this->now() - start_time).seconds());
+
 }
 
 void ControllerServer::setPlannerPath(const nav_msgs::msg::Path & path)
@@ -451,23 +564,395 @@ void ControllerServer::setPlannerPath(const nav_msgs::msg::Path & path)
   end_pose_.header.frame_id = path.header.frame_id;
   goal_checkers_[current_goal_checker_]->reset();
 
-  RCLCPP_DEBUG(
+  RCLCPP_WARN(
     get_logger(), "Path end point is (%.2f, %.2f)",
     end_pose_.pose.position.x, end_pose_.pose.position.y);
 
   current_path_ = path;
 }
 
+// 以c为中心，pt_start逆时针旋转到pt_end的弧度
+// 返回值范围 [0, 2.0 * M_PI]
+float CalAngelOfTwoVector(float c_x, float c_y,
+                        float pt_start_x, float pt_start_y,
+                        float pt_end_x, float pt_end_y) {
+float theta =
+    atan2(pt_start_x - c_x, pt_start_y - c_y) - atan2(pt_end_x - c_x, pt_end_y - c_y);
+if (theta < 0) theta = theta + 2.0 * M_PI;
+return theta;
+}
+
+bool ControllerServer::IsGlobalPathUpdated() {
+
+  updateGlobalPath();
+  if (last_recved_global_path_sec_ == current_path_.header.stamp.sec) {
+    return false;
+  } else {
+    last_recved_global_path_sec_ = current_path_.header.stamp.sec;
+    return true;
+  }
+
+  // std::lock_guard<std::mutex> lock(global_path_mutex_);
+  // if (last_recved_global_path_sec_ == recved_global_path_.header.stamp.sec) {
+  //   return false;
+  // } else {
+  //   last_recved_global_path_sec_ = recved_global_path_.header.stamp.sec;
+  //   return true;
+  // }
+
+  return false;
+}
+
+// 根据规划的路径current_path，寻找第一个和robot距离超过dist_robot_path_thr的规划点
+// 返回对应的规划点的索引idx
+int ControllerServer::FindPathIndex(const nav_msgs::msg::Path& current_path,
+  float dist_robot_path_thr) {
+  geometry_msgs::msg::PoseStamped robot_current_pose;
+  if (!getRobotPose(robot_current_pose)) {
+    return -1;
+  }
+  if (current_path.poses.empty()) {
+    RCLCPP_WARN(get_logger(), "Path is empty");
+    return -1;
+  }
+
+  last_recved_global_path_sec_ = current_path.header.stamp.sec;
+
+  RCLCPP_INFO(get_logger(), "robot pose ts: %d.%d, current_path ts: %d.%d",
+    robot_current_pose.header.stamp.sec, robot_current_pose.header.stamp.nanosec,
+    current_path.header.stamp.sec, current_path.header.stamp.nanosec
+    );
+
+  // 先找到和robot距离最近的点，作为起点
+  // 避免因为robot移动了一段距离后，而plan未更新，导致robot返回起点
+  int dist_min_path_index = 0;
+  float dist_min = 0;
+  for (size_t idx = 0; idx < current_path.poses.size(); idx++) {
+    const auto& path_pose = current_path.poses.at(idx);
+    // 计算robot和path之间的距离
+    float dist_robot_path = std::hypot(robot_current_pose.pose.position.x - path_pose.pose.position.x,
+                  robot_current_pose.pose.position.y - path_pose.pose.position.y);
+    if (dist_robot_path < dist_min) {
+      dist_min = dist_robot_path;
+      dist_min_path_index = idx;
+    }
+  }
+
+  // 找到第一个和robot之间距离超过阈值的规划点
+  size_t path_index = dist_min_path_index;
+  // robot和规划点之间的距离
+  float dist_robot_path;
+  for (size_t idx = dist_min_path_index; idx < current_path.poses.size(); idx++) {
+    const auto& path_pose = current_path.poses.at(idx);
+    // 计算robot和path之间的距离
+    dist_robot_path = std::hypot(robot_current_pose.pose.position.x - path_pose.pose.position.x,
+                  robot_current_pose.pose.position.y - path_pose.pose.position.y);
+    if (dist_robot_path > dist_robot_path_thr) {
+      path_index = idx;
+      break;
+    }
+  }
+  
+  if (dist_robot_path <= dist_robot_path_thr) {
+    RCLCPP_ERROR(get_logger(), "Find the path point fail, dist_robot_path: %.2f, dist_robot_path_thr: %.2f",
+      dist_robot_path, dist_robot_path_thr);
+    return -1;
+  }
+
+  RCLCPP_WARN(get_logger(), "Find the path point success, dist_min_path_index: %d, dist_min: %.2f, path_index: %d, dist_robot_path: %.2f, dist_robot_path_thr: %.2f",
+    dist_min_path_index, dist_min,
+    static_cast<int>(path_index), dist_robot_path,
+    dist_robot_path_thr
+    );
+  
+  ClearMarker();
+
+  {
+    // 发布找到的规划点
+    visualization_msgs::msg::MarkerArray marker_array;
+    auto marker = marker_;
+    int count = 0;
+    marker.header = current_path.header;
+    marker.id = count++;
+    marker.ns = "CUBE";
+    marker.pose.position.x = current_path.poses.at(path_index).pose.position.x;
+    marker.pose.position.y = current_path.poses.at(path_index).pose.position.y;
+    marker.action = visualization_msgs::msg::Marker::ADD;
+    marker_array.markers.push_back(marker);
+    if (marker_array.markers.size() > 0) {
+      dynamic_obstacle_markers_pub_->publish(std::move(marker_array));
+    }
+  }
+
+  return static_cast<int>(path_index);
+}
+
+float ControllerServer::GetYawDiff(const geometry_msgs::msg::PoseStamped& path_pose) {
+  geometry_msgs::msg::PoseStamped robot_current_pose;
+  getRobotPose(robot_current_pose);
+
+  std::string grid_frame = robot_current_pose.header.frame_id;
+  std::string nav2_costmap_global_frame_ = "base_link";
+  geometry_msgs::msg::Transform transform_grid2global =
+    tf_buffer_->lookupTransform(nav2_costmap_global_frame_, grid_frame,
+    robot_current_pose.header.stamp, tf2::durationFromSec(0.1)).transform;
+  // 将grid origin坐标转换成订阅到的nav2_costmap_global_frame_所在的坐标系
+  tf2::Transform tf2_transform;
+  tf2::fromMsg(transform_grid2global, tf2_transform);
+  
+  double yaw = tf2::getYaw(robot_current_pose.pose.orientation);
+
+  double robot_x;
+  double robot_y;
+  {
+    tf2::Vector3 p(robot_current_pose.pose.position.x, robot_current_pose.pose.position.y, 0);
+    p = tf2_transform * p;
+    robot_x = p.x();
+    robot_y = p.y();
+  }
+  double robot_forward_x = robot_x + 1.0;
+  double robot_forward_y = robot_y;
+
+  double path_x = 0;
+  double path_y = 0;
+  {
+    tf2::Vector3 p(path_pose.pose.position.x, path_pose.pose.position.y, 0);
+    p = tf2_transform * p;
+    path_x = p.x();
+    path_y = p.y();
+  }
+
+  // 以 (robot_forward_x, robot_forward_y) 为中心，计算 (robot_x, robot_y) 和 (path_x, path_y) 之间的夹角
+  // float dyaw = CalAngelOfTwoVector(cv::Point2f(robot_x, robot_y),
+  //   cv::Point2f(robot_forward_x, robot_forward_y),
+  //   cv::Point2f(path_x, path_y), true);
+    
+  float dyaw = CalAngelOfTwoVector(robot_x, robot_y,
+                      robot_forward_x, robot_forward_y,
+                      path_x, path_y);
+
+  RCLCPP_INFO(get_logger(), "dyaw: %.2f, %d, robot yaw: %.2f, %d, (%.2f, %.2f), (%.2f, %.2f), (%.2f, %.2f)",
+    dyaw, static_cast<int>(dyaw * 180.0 / 3.14159),
+    yaw, static_cast<int>(yaw * 180.0 / 3.14159),
+    robot_x, robot_y, robot_forward_x, robot_forward_y, path_x, path_y
+    );
+
+  return dyaw;
+}
+
+// 
+bool ControllerServer::RotateAndMove(float yaw_goal_tolerance, float stop_dist_thr) {
+  // 最新的路径规划
+  nav_msgs::msg::Path current_path;
+  {
+    std::lock_guard<std::mutex> lock(global_path_mutex_);
+    // current_path = recved_global_path_;
+    current_path = current_path_;
+  }
+
+  // 寻找和robot距离为 dist_robot_path_thr 的最近路径规划点
+  float dist_robot_path_thr = stop_dist_thr;
+  int path_index = FindPathIndex(current_path, dist_robot_path_thr);
+  if (path_index < 0) {
+    RCLCPP_ERROR(get_logger(), "find path index fail");
+    return false;
+  }
+
+  // TODO 从障碍物少的一侧旋转
+
+  float rotate_z = 0.8;
+  geometry_msgs::msg::TwistStamped cmd_vel_2d;
+  cmd_vel_2d.twist.angular.x = 0;
+  cmd_vel_2d.twist.angular.y = 0;
+  cmd_vel_2d.twist.angular.z = 0;
+  cmd_vel_2d.twist.linear.x = 0;
+  cmd_vel_2d.twist.linear.y = 0;
+  cmd_vel_2d.twist.linear.z = 0;
+  cmd_vel_2d.header = current_path.header;
+
+  auto get_distance = [this](geometry_msgs::msg::PoseStamped dest_pose)->float{
+    geometry_msgs::msg::PoseStamped robot_current_pose;
+    if (!getRobotPose(robot_current_pose)) {
+      RCLCPP_ERROR(get_logger(), "get robot pose failed");
+      return -1;
+    }
+
+    // 计算robot和path之间的距离
+    float dist = std::hypot(robot_current_pose.pose.position.x - dest_pose.pose.position.x,
+                  robot_current_pose.pose.position.y - dest_pose.pose.position.y);
+    RCLCPP_INFO(get_logger(), "robot pose frame_id: %s, (%.2f, %.2f), ts: %d.%d, path (%.2f, %.2f), dist: %.2f",
+      robot_current_pose.header.frame_id.data(),
+      robot_current_pose.pose.position.x, robot_current_pose.pose.position.y,
+      robot_current_pose.header.stamp.sec, robot_current_pose.header.stamp.nanosec,
+      dest_pose.pose.position.x, dest_pose.pose.position.y,
+      dist
+      );
+      
+    return dist;
+  };
+    
+  // 开始控制的时间，用于超时时间的计算
+  auto time_start = this->now();
+  // 开始平移时，robot的起点，用于控制平移完成
+  std::shared_ptr<geometry_msgs::msg::PoseStamped> sp_start_robot_pose = nullptr;
+  while (rclcpp::ok()) {
+    if (this->now() - time_start > std::chrono::seconds(5)) {
+      RCLCPP_WARN(this->get_logger(), "move timeout");
+      publishZeroVelocity();
+      break;
+    }
+    // 检查是否有新的 path
+    if (IsGlobalPathUpdated()) {
+      nav_msgs::msg::Path old_path;
+
+      {
+        std::lock_guard<std::mutex> lock(global_path_mutex_);
+        // current_path = recved_global_path_;
+        old_path = current_path;
+        current_path = current_path_;
+        cmd_vel_2d.header = current_path.header;
+      }
+      path_index = FindPathIndex(current_path, dist_robot_path_thr);
+      if (path_index < 0) {
+        RCLCPP_ERROR(get_logger(), "find path index fail");
+        return false;
+      }
+
+      // TODO 判断path是否是有效更新
+      if (!old_path.poses.empty() && !current_path.poses.empty()) {
+        RCLCPP_WARN(get_logger(), "global path updated, first pose in new path: (%.2f, %.2f), index: %d, first pose in old path: (%.2f, %.2f)",
+          current_path.poses.at(0).pose.position.x, current_path.poses.at(0).pose.position.y,
+          path_index,
+          old_path.poses.at(0).pose.position.x, old_path.poses.at(0).pose.position.y
+          );
+      }
+    }
+
+    float dyaw = GetYawDiff(current_path.poses.at(path_index));
+    // 将逆时针弧度转成最小弧度夹角
+    float yaw_absolute = dyaw;
+    if (dyaw > 3.14159) {
+      yaw_absolute = 2 * 3.14159 - dyaw;
+    }
+    RCLCPP_INFO(get_logger(), "yaw_absolute: %.2f, %d, yaw_goal_tolerance: %.2f, %d",
+      yaw_absolute, static_cast<int>(yaw_absolute * 180.0 / 3.14159),
+      yaw_goal_tolerance, static_cast<int>(yaw_goal_tolerance * 180.0 / 3.14159));
+    if (yaw_absolute < yaw_goal_tolerance) {
+      RCLCPP_INFO(get_logger(), "do not need to rotate");
+    } else {
+      cmd_vel_2d.twist.linear.x = 0;
+      cmd_vel_2d.twist.linear.y = 0;
+      cmd_vel_2d.twist.linear.z = 0;
+      cmd_vel_2d.twist.angular.x = 0.0;
+      cmd_vel_2d.twist.angular.y = 0;
+      if (dyaw < 3.14159) {
+        // 逆时针旋转
+        cmd_vel_2d.twist.angular.z = (1.0) * rotate_z;
+        RCLCPP_INFO(get_logger(), "rotate anti-clockwise");
+      } else {
+        // 顺时针旋转
+        cmd_vel_2d.twist.angular.z = (-1.0) * rotate_z;
+        RCLCPP_INFO(get_logger(), "rotate clockwise");
+      }
+
+      // 如果角度很小，减小旋转速度
+      if (yaw_absolute < yaw_goal_tolerance * 2.0) {
+        // 转动了超过一半
+        cmd_vel_2d.twist.angular.z = cmd_vel_2d.twist.angular.z * 0.5;
+      }
+
+      publishVelocity(cmd_vel_2d);
+      std::shared_ptr<Action::Feedback> feedback = std::make_shared<Action::Feedback>();
+      feedback->speed = std::hypot(cmd_vel_2d.twist.linear.x, cmd_vel_2d.twist.linear.y);
+      action_server_->publish_feedback(feedback);
+      rclcpp::sleep_for(std::chrono::milliseconds(50));
+      continue;
+    }
+
+    // 运行到这里说明角度小于阈值
+
+    // 移动
+    // TODO 判断前方是否有障碍物
+    if (!sp_start_robot_pose) {
+      // 设置平移起点
+      sp_start_robot_pose = std::make_shared<geometry_msgs::msg::PoseStamped>();
+      geometry_msgs::msg::PoseStamped robot_current_pose;
+      if (getRobotPose(robot_current_pose)) {
+        *sp_start_robot_pose = robot_current_pose;
+      } else {
+        break;
+      }
+    }
+
+    // 计算robot当前位置和移动前位置之间的距离
+    float dist_robot_to_start = get_distance(*sp_start_robot_pose);
+    if (dist_robot_to_start < 0) {
+      // 计算失败
+      return false;
+    }
+    RCLCPP_INFO(get_logger(), "dist_robot_to_start: %.2f, stop_dist_thr: %.2f",
+      dist_robot_to_start, stop_dist_thr);
+    if (dist_robot_to_start >= stop_dist_thr) {
+      // 移动了足够远的距离，停止
+      RCLCPP_INFO(get_logger(), "no need to move");
+      // 不需要旋转和平移，继续跑轨迹规划
+      break;
+    } else {
+      RCLCPP_INFO(get_logger(), "do move");
+      cmd_vel_2d.twist.linear.x = 0.2;
+      cmd_vel_2d.twist.linear.y = 0;
+      cmd_vel_2d.twist.linear.z = 0;
+      cmd_vel_2d.twist.angular.x = 0.0;
+      cmd_vel_2d.twist.angular.y = 0;
+      cmd_vel_2d.twist.angular.z = 0;
+      if (dist_robot_to_start >= stop_dist_thr * 0.5) {
+        // 移动了超过一半
+        cmd_vel_2d.twist.linear.x = cmd_vel_2d.twist.linear.x * 0.5;
+      }
+
+      publishVelocity(cmd_vel_2d);
+      std::shared_ptr<Action::Feedback> feedback = std::make_shared<Action::Feedback>();
+      feedback->speed = std::hypot(cmd_vel_2d.twist.linear.x, cmd_vel_2d.twist.linear.y);
+      action_server_->publish_feedback(feedback);
+      rclcpp::sleep_for(std::chrono::milliseconds(50));
+      continue;
+    }
+  }
+
+  float dyaw = GetYawDiff(current_path.poses.at(path_index));
+  float dist_robot_to_start = -1;
+  if (sp_start_robot_pose) {
+    dist_robot_to_start = get_distance(*sp_start_robot_pose);
+  }
+  RCLCPP_WARN(get_logger(), "after rotate and move, dyaw: %.2f, %d, dist_robot_to_start: %.2f",
+    dyaw, static_cast<int>(dyaw * 180.0 / 3.14159), dist_robot_to_start);
+  publishZeroVelocity();
+
+  return true;
+}
+
 void ControllerServer::computeAndPublishVelocity()
 {
+  RCLCPP_INFO(get_logger(), "do compute And PublishVelocity");
   geometry_msgs::msg::PoseStamped pose;
-
+  
   if (!getRobotPose(pose)) {
     throw nav2_core::PlannerException("Failed to obtain robot pose");
   }
 
   if (!progress_checker_->check(pose)) {
-    throw nav2_core::PlannerException("Failed to make progress");
+    // 不抛异常
+    // 此处抛异常会导致重新发起导航action请求
+    // throw nav2_core::PlannerException("Failed to make progress");
+    failed_to_make_progress_count_++;
+    RCLCPP_ERROR(get_logger(), "Failed to make progress, failed_to_make_progress_count_: %d",
+      failed_to_make_progress_count_);
+    RCLCPP_INFO(get_logger(), "enable precontrol_");
+    en_precontrol_ = true;
+    if (failed_to_make_progress_count_ >= 3) {
+      throw nav2_core::PlannerException("Failed to make progress");
+    }
+    return;
   }
 
   nav_2d_msgs::msg::Twist2D twist = getThresholdedTwist(odom_sub_->getTwist());
@@ -526,7 +1011,7 @@ void ControllerServer::computeAndPublishVelocity()
     nav2_util::geometry_utils::calculate_path_length(current_path_, find_closest_pose_idx());
   action_server_->publish_feedback(feedback);
 
-  RCLCPP_DEBUG(get_logger(), "Publishing velocity at time %.2f", now().seconds());
+  RCLCPP_INFO(get_logger(), "Publishing velocity at time %.2f", now().seconds());
   publishVelocity(cmd_vel_2d);
 }
 
@@ -563,12 +1048,15 @@ void ControllerServer::publishVelocity(const geometry_msgs::msg::TwistStamped & 
 {
   auto cmd_vel = std::make_unique<geometry_msgs::msg::Twist>(velocity.twist);
   if (vel_publisher_->is_activated() && vel_publisher_->get_subscription_count() > 0) {
+    
+    RCLCPP_INFO(get_logger(), "publish Velocity x: %.2f, z: %.2f", cmd_vel->linear.x, cmd_vel->angular.z);
     vel_publisher_->publish(std::move(cmd_vel));
   }
 }
 
 void ControllerServer::publishZeroVelocity()
 {
+  RCLCPP_WARN(this->get_logger(), "publish Zero Velocity");
   geometry_msgs::msg::TwistStamped velocity;
   velocity.twist.angular.x = 0;
   velocity.twist.angular.y = 0;
@@ -597,6 +1085,16 @@ bool ControllerServer::isGoalReached()
   nav_2d_utils::transformPose(
     costmap_ros_->getTfBuffer(), costmap_ros_->getGlobalFrameID(),
     end_pose_, transformed_end_pose, tolerance);
+
+
+  // RCLCPP_INFO_STREAM(rclcpp::get_logger("ControllerServer"),
+  // "check isGoalReached"
+  // << ", costmap_ros_->getGlobalFrameID: " << costmap_ros_->getGlobalFrameID()
+  // << ", end_pose_ frame_id: " << end_pose_.header.frame_id
+  // << ", x: " << end_pose_.pose.position.x << ", y: " << end_pose_.pose.position.y
+  // << ", transformed_end_pose frame_id: " << transformed_end_pose.header.frame_id
+  // << ", x: " << transformed_end_pose.pose.position.x << ", y: " << transformed_end_pose.pose.position.y
+  // );
 
   return goal_checkers_[current_goal_checker_]->isGoalReached(
     pose.pose, transformed_end_pose.pose,

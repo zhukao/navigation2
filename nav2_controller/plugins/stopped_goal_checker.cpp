@@ -85,12 +85,21 @@ bool StoppedGoalChecker::isGoalReached(
   const geometry_msgs::msg::Twist & velocity)
 {
   bool ret = SimpleGoalChecker::isGoalReached(query_pose, goal_pose, velocity);
+  RCLCPP_INFO_STREAM(rclcpp::get_logger(""), "StoppedGoalChecker isGoalReached: " << ret);
   if (!ret) {
     return ret;
   }
 
-  return fabs(velocity.angular.z) <= rot_stopped_velocity_ &&
+  bool check = fabs(velocity.angular.z) <= rot_stopped_velocity_ &&
          hypot(velocity.linear.x, velocity.linear.y) <= trans_stopped_velocity_;
+
+  RCLCPP_INFO_STREAM(rclcpp::get_logger(""), "check: " << check
+  << ", velocity.angular.z: " << fabs(velocity.angular.z)
+  << ", rot_stopped_velocity_: " << rot_stopped_velocity_
+  << ", hypot: " << hypot(velocity.linear.x, velocity.linear.y)
+  << ", trans_stopped_velocity_: " << trans_stopped_velocity_);
+
+  return check;
 }
 
 bool StoppedGoalChecker::getTolerances(

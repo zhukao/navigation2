@@ -36,6 +36,12 @@
 #include "pluginlib/class_loader.hpp"
 #include "pluginlib/class_list_macros.hpp"
 
+// Rviz
+#include <visualization_msgs/msg/marker.hpp>
+#include <visualization_msgs/msg/marker_array.hpp>
+// Messages
+#include <std_msgs/msg/color_rgba.hpp>
+
 namespace nav2_controller
 {
 
@@ -264,12 +270,39 @@ protected:
   // Current path container
   nav_msgs::msg::Path current_path_;
 
+  bool en_precontrol_ = false;
+  bool is_precontrolling_ = false;
+  int failed_to_make_progress_count_ = 0;
+
+  std::string pub_dynamic_obstacle_markers_topic_name_ = "tros_follow_path_markers";
+  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr
+      dynamic_obstacle_markers_pub_ = nullptr;
+  visualization_msgs::msg::Marker marker_;
+  
+  // 有执行Rotate/Move就返回true
+  void ClearMarker();
+  bool RotateAndMove(float yaw_goal_tolerance, float stop_dist_robot_path_thr);
+  int FindPathIndex(const nav_msgs::msg::Path& current_path, float dist_robot_path_thr);
+  float GetYawDiff(const geometry_msgs::msg::PoseStamped& path_pose);
+  bool IsGlobalPathUpdated();
+  int last_recved_global_path_sec_;
+  std::string global_path_topic_ = "/transformed_global_plan";
+  rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr global_path_sub_;
+  void GlobalPathCallback(const nav_msgs::msg::Path::SharedPtr msg);
+  nav_msgs::msg::Path recved_global_path_;
+  std::mutex global_path_mutex_;
+  std::shared_ptr<std::thread> manual_action_thread_ = nullptr;
+  std::mutex manual_action_mutex_;
+
 private:
   /**
     * @brief Callback for speed limiting messages
     * @param msg Shared pointer to nav2_msgs::msg::SpeedLimit
     */
   void speedLimitCallback(const nav2_msgs::msg::SpeedLimit::SharedPtr msg);
+  
+  std::unique_ptr<tf2_ros::Buffer> tf_buffer_ = nullptr;
+  std::shared_ptr<tf2_ros::TransformListener> transform_listener_ = nullptr;
 };
 
 }  // namespace nav2_controller
