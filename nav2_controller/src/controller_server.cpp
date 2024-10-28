@@ -474,9 +474,11 @@ void ControllerServer::computeControl()
       {
         std::unique_lock<std::mutex> lock(manual_action_mutex_);
         if (en_precontrol_) {
-          RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000, "en precontrol_");
+          // RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000, "en precontrol_");
+          RCLCPP_INFO(get_logger(), "en precontrol_");
           if (is_precontrolling_) {
-            RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000, "pre controlling is running");
+            // RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000, "pre controlling is running");
+            RCLCPP_INFO(get_logger(), "pre controlling is running");
             rclcpp::Rate sleep_rate(20);
             sleep_rate.sleep();
             continue;
@@ -873,6 +875,7 @@ bool ControllerServer::RotateAndMove(float yaw_goal_tolerance, float stop_dist_t
 
     // 移动
     // TODO 判断前方是否有障碍物
+    // 计算每个规划点对应cell的cost，判断是否为有效路径
     if (!sp_start_robot_pose) {
       // 设置平移起点
       sp_start_robot_pose = std::make_shared<geometry_msgs::msg::PoseStamped>();
@@ -947,10 +950,11 @@ void ControllerServer::computeAndPublishVelocity()
     failed_to_make_progress_count_++;
     RCLCPP_ERROR(get_logger(), "Failed to make progress, failed_to_make_progress_count_: %d",
       failed_to_make_progress_count_);
-    RCLCPP_INFO(get_logger(), "enable precontrol_");
-    en_precontrol_ = true;
     if (failed_to_make_progress_count_ >= 3) {
       throw nav2_core::PlannerException("Failed to make progress");
+    } else {
+      RCLCPP_INFO(get_logger(), "enable precontrol_");
+      en_precontrol_ = true;
     }
     return;
   }
