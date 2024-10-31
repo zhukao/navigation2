@@ -270,8 +270,20 @@ protected:
   // Current path container
   nav_msgs::msg::Path current_path_;
 
-  bool en_precontrol_ = false;
-  bool is_precontrolling_ = false;
+
+  enum class NavState
+  {
+    NAV_TO_BE_STARTED = 0, // 本次导航待开始，进入computeControl前的初始状态
+    NAV_GOING, // 执行正常（非接管）导航中
+    NAV_CHECK_FAILED,  // progress check 失败
+    NAV_FAILED,  // progress check 失败次数超过阈值，本次规划被terminate
+    NAV_SUCCED, // 导航成功
+    TAKE_OVER_GOING, // 正在接管中
+    TAKE_OVER_SUCCED, // 接管成功
+    TAKE_OVER_FAILED, // 接管失败
+  };
+  NavState nav_state_ = NavState::NAV_TO_BE_STARTED;
+  std::mutex mtx_nav_state_;
   int failed_to_make_progress_count_ = 0;
 
   std::string pub_dynamic_obstacle_markers_topic_name_ = "tros_follow_path_markers";
@@ -296,10 +308,10 @@ protected:
   void GlobalPathCallback(const nav_msgs::msg::Path::SharedPtr msg);
   nav_msgs::msg::Path recved_global_path_;
   std::mutex global_path_mutex_;
-  std::shared_ptr<std::thread> manual_action_thread_ = nullptr;
-  std::mutex manual_action_mutex_;
+  std::shared_ptr<std::thread> sp_take_over_thread_ = nullptr;
+  std::mutex take_over_mutex_;
   std::set<std::string> marker_names_{
-    "CUBE", "ManualControl"
+    "CUBE", "TakeOver"
   }; 
 
 private:

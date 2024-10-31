@@ -260,9 +260,9 @@ ControllerServer::on_configure(const rclcpp_lifecycle::State & /*state*/)
     speed_limit_topic, rclcpp::QoS(10),
     std::bind(&ControllerServer::speedLimitCallback, this, std::placeholders::_1));
 
-  global_path_sub_ = create_subscription<nav_msgs::msg::Path>(
-    global_path_topic_, rclcpp::QoS(10),
-    std::bind(&ControllerServer::GlobalPathCallback, this, std::placeholders::_1));
+  // global_path_sub_ = create_subscription<nav_msgs::msg::Path>(
+  //   global_path_topic_, rclcpp::QoS(10),
+  //   std::bind(&ControllerServer::GlobalPathCallback, this, std::placeholders::_1));
     
   tf_buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
   transform_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
@@ -311,13 +311,13 @@ ControllerServer::on_deactivate(const rclcpp_lifecycle::State & /*state*/)
 
   // 等待接管线程退出
   {
-    std::unique_lock<std::mutex> lock(manual_action_mutex_);
-    if (manual_action_thread_ && manual_action_thread_->joinable()) {
-      RCLCPP_WARN(get_logger(), "waiting for manual action thread to finish");
-      manual_action_thread_->join();
-      manual_action_thread_.reset();
-      manual_action_thread_ = nullptr;
-      RCLCPP_WARN(get_logger(), "manual action thread is exited");
+    std::unique_lock<std::mutex> lock(take_over_mutex_);
+    if (sp_take_over_thread_ && sp_take_over_thread_->joinable()) {
+      RCLCPP_WARN(get_logger(), "waiting for take_over task to finish");
+      sp_take_over_thread_->join();
+      sp_take_over_thread_.reset();
+      sp_take_over_thread_ = nullptr;
+      RCLCPP_WARN(get_logger(), "take_over task is exited");
     }
   }
 
@@ -353,13 +353,13 @@ ControllerServer::on_cleanup(const rclcpp_lifecycle::State & /*state*/)
 
   // 等待接管线程退出
   {
-    std::unique_lock<std::mutex> lock(manual_action_mutex_);
-    if (manual_action_thread_ && manual_action_thread_->joinable()) {
-      RCLCPP_WARN(get_logger(), "waiting for manual action thread to finish");
-      manual_action_thread_->join();
-      manual_action_thread_.reset();
-      manual_action_thread_ = nullptr;
-      RCLCPP_WARN(get_logger(), "manual action thread is exited");
+    std::unique_lock<std::mutex> lock(take_over_mutex_);
+    if (sp_take_over_thread_ && sp_take_over_thread_->joinable()) {
+      RCLCPP_WARN(get_logger(), "waiting for take_over task to finish");
+      sp_take_over_thread_->join();
+      sp_take_over_thread_.reset();
+      sp_take_over_thread_ = nullptr;
+      RCLCPP_WARN(get_logger(), "take_over task is exited");
     }
   }
 
@@ -450,7 +450,6 @@ void ControllerServer::computeControl()
 
   RCLCPP_INFO(get_logger(), "Received a goal, begin computing control effort.");
   auto start_time = this->now();
-
   try {
     std::string c_name = action_server_->get_current_goal()->controller_id;
     std::string current_controller;
@@ -496,44 +495,55 @@ void ControllerServer::computeControl()
       }
 
       updateGlobalPath();
-
+        
       {
-        std::unique_lock<std::mutex> lock(manual_action_mutex_);
-        if (en_precontrol_) {
-          RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000, "en precontrol_");
-          // RCLCPP_INFO(get_logger(), "en precontrol_");
-          if (is_precontrolling_) {
-            // RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000, "pre controlling is running");
-            // RCLCPP_INFO(get_logger(), "pre controlling is running");
-            // rclcpp::Rate sleep_rate(20);
-            // sleep_rate.sleep();
-            continue;
-          } else {
-            RCLCPP_WARN(get_logger(), "create task");
-            if (manual_action_thread_ && manual_action_thread_->joinable()) {
-              RCLCPP_WARN(get_logger(), "waiting for manual action thread to finish");
-              manual_action_thread_->join();
-              manual_action_thread_.reset();
-              manual_action_thread_ = nullptr;
-              RCLCPP_WARN(get_logger(), "manual action thread is exited");
-            }
-            is_precontrolling_ = true;
-            manual_action_thread_ = std::make_shared<std::thread>([this]() {
-              RCLCPP_WARN(get_logger(), "task start");
-              RotateAndMove(3.1415 / 180.0 * 10.0, 0.3);
-              ClearMarker("ManualControl");
-              is_precontrolling_ = false;
-              en_precontrol_ = false;
-              RCLCPP_WARN(get_logger(), "task done");
-            });
+        std::unique_lock<std::mutex> lock(mtx_nav_state_);
+        if (NavState::TAKE_OVER_GOING == nav_state_) {
+          // 正在接管中
+          continue;
+        } else if (NavState::NAV_CHECK_FAILED == nav_state_) {
+          // 创建接管任务
+          std::unique_lock<std::mutex> lock(take_over_mutex_);
+          RCLCPP_WARN(get_logger(), "create take_over task");
+          if (sp_take_over_thread_ && sp_take_over_thread_->joinable()) {
+            // 等待上次接管完成
+            RCLCPP_WARN(get_logger(), "waiting for take_over task to finish");
+            sp_take_over_thread_->join();
+            sp_take_over_thread_.reset();
+            sp_take_over_thread_ = nullptr;
+            RCLCPP_WARN(get_logger(), "take_over task is exited");
           }
+
+          // 进入接管状态
+          nav_state_ = NavState::TAKE_OVER_GOING;
+          
+          sp_take_over_thread_ = std::make_shared<std::thread>([this]() {
+            RCLCPP_WARN(get_logger(), "take_over task start");
+            bool take_over_success = RotateAndMove(3.1415 / 180.0 * 10.0, 0.3);
+            ClearMarker("TakeOver");
+            RCLCPP_WARN(get_logger(), "take_over task done");
+            
+            {
+              std::unique_lock<std::mutex> lock(mtx_nav_state_);
+              if (nav_state_ == NavState::TAKE_OVER_GOING) {
+                if (take_over_success) {
+                  nav_state_ = NavState::TAKE_OVER_SUCCED;
+                } else {
+                  nav_state_ = NavState::TAKE_OVER_FAILED;
+                }
+              }
+            }
+          });
           continue;
         }
-
       }
       
       // VisualizeGlobalPath();
-
+      {
+        std::unique_lock<std::mutex> lock(mtx_nav_state_);
+        // 常规导航状态
+        nav_state_ = NavState::NAV_GOING;
+      }
       computeAndPublishVelocity();
 
       if (isGoalReached()) {
@@ -550,22 +560,28 @@ void ControllerServer::computeControl()
   } catch (nav2_core::PlannerException & e) {
     RCLCPP_ERROR(this->get_logger(), "%s", e.what());
     publishZeroVelocity();
-    RCLCPP_WARN(get_logger(), "action_server_->terminate_current");
+    RCLCPP_WARN(get_logger(), "action_server_ terminate_current");
     action_server_->terminate_current();
     
     RCLCPP_WARN(get_logger(), "computeControl done, time cost: %.2f sec",
       (this->now() - start_time).seconds());
-
+    {
+      std::unique_lock<std::mutex> lock(mtx_nav_state_);
+      nav_state_ = NavState::NAV_FAILED;
+    }
     return;
   } catch (std::exception & e) {
     RCLCPP_ERROR(this->get_logger(), "%s", e.what());
     publishZeroVelocity();
     std::shared_ptr<Action::Result> result = std::make_shared<Action::Result>();
-    RCLCPP_WARN(get_logger(), "action_server_->terminate_current with result");
+    RCLCPP_WARN(get_logger(), "action_server_ terminate_current with result");
     action_server_->terminate_current(result);
     RCLCPP_WARN(get_logger(), "computeControl done, time cost: %.2f sec",
       (this->now() - start_time).seconds());
-
+    {
+      std::unique_lock<std::mutex> lock(mtx_nav_state_);
+      nav_state_ = NavState::NAV_FAILED;
+    }
     return;
   }
 
@@ -575,6 +591,11 @@ void ControllerServer::computeControl()
 
   // TODO(orduno) #861 Handle a pending preemption and set controller name
   action_server_->succeeded_current();
+  
+  {
+    std::unique_lock<std::mutex> lock(mtx_nav_state_);
+    nav_state_ = NavState::NAV_SUCCED;
+  }
 
   RCLCPP_WARN(get_logger(), "computeControl done, time cost: %.2f sec",
     (this->now() - start_time).seconds());
@@ -819,7 +840,7 @@ bool ControllerServer::GetYawDiff(
     auto marker = marker_;
     marker.type = visualization_msgs::msg::Marker::SPHERE;
     marker.action = visualization_msgs::msg::Marker::ADD;
-    marker.ns = "ManualControl";
+    marker.ns = "TakeOver";
     marker.scale.x = 0.1;
     marker.scale.y = 0.1;
     marker.scale.z = 0.01;
@@ -1063,6 +1084,17 @@ bool ControllerServer::RotateAndMove(float yaw_goal_tolerance, float stop_dist_t
       publishZeroVelocity();
       break;
     }
+    
+    {
+      std::unique_lock<std::mutex> lock(mtx_nav_state_);
+      if (nav_state_ != NavState::TAKE_OVER_GOING) {
+        RCLCPP_WARN(this->get_logger(), "nav state changed to %d, stop take-over task", static_cast<int>(nav_state_));
+        // 状态已经发生变化，停止接管
+        publishZeroVelocity();
+        break;
+      }
+    }
+
     // 检查是否有新的 path
     // if (IsGlobalPathUpdated()) 
     // 不检查更新，避免线程安全问题
@@ -1133,9 +1165,11 @@ bool ControllerServer::RotateAndMove(float yaw_goal_tolerance, float stop_dist_t
       }
 
       publishVelocity(cmd_vel_2d);
-      std::shared_ptr<Action::Feedback> feedback = std::make_shared<Action::Feedback>();
-      feedback->speed = std::hypot(cmd_vel_2d.twist.linear.x, cmd_vel_2d.twist.linear.y);
-      action_server_->publish_feedback(feedback);
+      
+      // std::shared_ptr<Action::Feedback> feedback = std::make_shared<Action::Feedback>();
+      // feedback->speed = std::hypot(cmd_vel_2d.twist.linear.x, cmd_vel_2d.twist.linear.y);
+      // action_server_->publish_feedback(feedback);
+
       rclcpp::sleep_for(std::chrono::milliseconds(50));
       continue;
     }
@@ -1188,9 +1222,10 @@ bool ControllerServer::RotateAndMove(float yaw_goal_tolerance, float stop_dist_t
       }
 
       publishVelocity(cmd_vel_2d);
-      std::shared_ptr<Action::Feedback> feedback = std::make_shared<Action::Feedback>();
-      feedback->speed = std::hypot(cmd_vel_2d.twist.linear.x, cmd_vel_2d.twist.linear.y);
-      action_server_->publish_feedback(feedback);
+
+      // std::shared_ptr<Action::Feedback> feedback = std::make_shared<Action::Feedback>();
+      // feedback->speed = std::hypot(cmd_vel_2d.twist.linear.x, cmd_vel_2d.twist.linear.y);
+      // action_server_->publish_feedback(feedback);
       rclcpp::sleep_for(std::chrono::milliseconds(50));
       continue;
     }
@@ -1230,8 +1265,8 @@ void ControllerServer::computeAndPublishVelocity()
     if (failed_to_make_progress_count_ >= 3) {
       throw nav2_core::PlannerException("Failed to make progress");
     } else {
-      RCLCPP_INFO(get_logger(), "enable precontrol_");
-      en_precontrol_ = true;
+      std::unique_lock<std::mutex> lock(mtx_nav_state_);
+      nav_state_ = NavState::NAV_CHECK_FAILED;
     }
     return;
   }
