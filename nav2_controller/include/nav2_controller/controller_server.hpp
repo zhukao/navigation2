@@ -280,11 +280,16 @@ protected:
   visualization_msgs::msg::Marker marker_;
   
   // 有执行Rotate/Move就返回true
-  void ClearMarker();
+  void ClearMarker(std::string ns);
   bool RotateAndMove(float yaw_goal_tolerance, float stop_dist_robot_path_thr);
   int FindPathIndex(const nav_msgs::msg::Path& current_path, float dist_robot_path_thr);
-  float GetYawDiff(const geometry_msgs::msg::PoseStamped& path_pose);
+  // 获取robot最新的pose，计算robot逆时针旋转到输入的path_pose的弧度
+  // 成功返回true，以及计算出来的dyaw
+  // 失败返回false
+  bool GetYawDiff(const geometry_msgs::msg::PoseStamped& path_pose, std::string path_frame_id, float& dyaw);
   bool IsGlobalPathUpdated();
+  bool CheckPathValid(const nav_msgs::msg::Path& path, int path_index);
+  void VisualizeGlobalPath();
   int last_recved_global_path_sec_;
   std::string global_path_topic_ = "/transformed_global_plan";
   rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr global_path_sub_;
@@ -293,6 +298,9 @@ protected:
   std::mutex global_path_mutex_;
   std::shared_ptr<std::thread> manual_action_thread_ = nullptr;
   std::mutex manual_action_mutex_;
+  std::set<std::string> marker_names_{
+    "CUBE", "ManualControl"
+  }; 
 
 private:
   /**

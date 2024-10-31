@@ -100,15 +100,17 @@ ControllerServer::ControllerServer(const rclcpp::NodeOptions & options)
   // marker_.lifetime.sec = 5.0;
   // marker_.lifetime.nanosec = 0.0;
   
-  ClearMarker();
+  for (const auto& marker_name : marker_names_) {
+    ClearMarker(marker_name);
+  }
 }
 
-void ControllerServer::ClearMarker() {
+void ControllerServer::ClearMarker(std::string ns) {
   if (dynamic_obstacle_markers_pub_) {
     visualization_msgs::msg::MarkerArray marker_array_clear;
     auto marker = marker_;
     marker.id = 0;
-    marker.ns = "CUBE";
+    marker.ns = ns;
     marker.action = visualization_msgs::msg::Marker::DELETEALL;
     marker_array_clear.markers.push_back(marker);
     dynamic_obstacle_markers_pub_->publish(std::move(marker_array_clear));
@@ -307,6 +309,18 @@ ControllerServer::on_deactivate(const rclcpp_lifecycle::State & /*state*/)
 {
   RCLCPP_INFO(get_logger(), "Deactivating");
 
+  // 等待接管线程退出
+  {
+    std::unique_lock<std::mutex> lock(manual_action_mutex_);
+    if (manual_action_thread_ && manual_action_thread_->joinable()) {
+      RCLCPP_WARN(get_logger(), "waiting for manual action thread to finish");
+      manual_action_thread_->join();
+      manual_action_thread_.reset();
+      manual_action_thread_ = nullptr;
+      RCLCPP_WARN(get_logger(), "manual action thread is exited");
+    }
+  }
+
   action_server_->deactivate();
   ControllerMap::iterator it;
   for (it = controllers_.begin(); it != controllers_.end(); ++it) {
@@ -336,6 +350,18 @@ nav2_util::CallbackReturn
 ControllerServer::on_cleanup(const rclcpp_lifecycle::State & /*state*/)
 {
   RCLCPP_INFO(get_logger(), "Cleaning up");
+
+  // 等待接管线程退出
+  {
+    std::unique_lock<std::mutex> lock(manual_action_mutex_);
+    if (manual_action_thread_ && manual_action_thread_->joinable()) {
+      RCLCPP_WARN(get_logger(), "waiting for manual action thread to finish");
+      manual_action_thread_->join();
+      manual_action_thread_.reset();
+      manual_action_thread_ = nullptr;
+      RCLCPP_WARN(get_logger(), "manual action thread is exited");
+    }
+  }
 
   // Cleanup the helper classes
   ControllerMap::iterator it;
@@ -474,13 +500,13 @@ void ControllerServer::computeControl()
       {
         std::unique_lock<std::mutex> lock(manual_action_mutex_);
         if (en_precontrol_) {
-          // RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000, "en precontrol_");
-          RCLCPP_INFO(get_logger(), "en precontrol_");
+          RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000, "en precontrol_");
+          // RCLCPP_INFO(get_logger(), "en precontrol_");
           if (is_precontrolling_) {
             // RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000, "pre controlling is running");
-            RCLCPP_INFO(get_logger(), "pre controlling is running");
-            rclcpp::Rate sleep_rate(20);
-            sleep_rate.sleep();
+            // RCLCPP_INFO(get_logger(), "pre controlling is running");
+            // rclcpp::Rate sleep_rate(20);
+            // sleep_rate.sleep();
             continue;
           } else {
             RCLCPP_WARN(get_logger(), "create task");
@@ -488,13 +514,14 @@ void ControllerServer::computeControl()
               RCLCPP_WARN(get_logger(), "waiting for manual action thread to finish");
               manual_action_thread_->join();
               manual_action_thread_.reset();
+              manual_action_thread_ = nullptr;
               RCLCPP_WARN(get_logger(), "manual action thread is exited");
             }
             is_precontrolling_ = true;
             manual_action_thread_ = std::make_shared<std::thread>([this]() {
               RCLCPP_WARN(get_logger(), "task start");
               RotateAndMove(3.1415 / 180.0 * 10.0, 0.3);
-              ClearMarker();
+              ClearMarker("ManualControl");
               is_precontrolling_ = false;
               en_precontrol_ = false;
               RCLCPP_WARN(get_logger(), "task done");
@@ -504,6 +531,8 @@ void ControllerServer::computeControl()
         }
 
       }
+      
+      // VisualizeGlobalPath();
 
       computeAndPublishVelocity();
 
@@ -567,7 +596,8 @@ void ControllerServer::setPlannerPath(const nav_msgs::msg::Path & path)
   goal_checkers_[current_goal_checker_]->reset();
 
   RCLCPP_WARN(
-    get_logger(), "Path end point is (%.2f, %.2f)",
+    get_logger(), "Path frame_id: %s, end point is (%.2f, %.2f)",
+    path.header.frame_id.data(),
     end_pose_.pose.position.x, end_pose_.pose.position.y);
 
   current_path_ = path;
@@ -625,6 +655,31 @@ int ControllerServer::FindPathIndex(const nav_msgs::msg::Path& current_path,
     current_path.header.stamp.sec, current_path.header.stamp.nanosec
     );
 
+  std::string path_frame = current_path.header.frame_id;
+  std::string robot_frame = robot_current_pose.header.frame_id;
+  double robot_x = robot_current_pose.pose.position.x;
+  double robot_y = robot_current_pose.pose.position.y;
+  if (path_frame != robot_frame) {
+    try {
+      geometry_msgs::msg::Transform transform_robot2path =
+        tf_buffer_->lookupTransform(path_frame, robot_frame,
+        robot_current_pose.header.stamp, tf2::durationFromSec(0.1)).transform;
+      tf2::Transform tf2_transform_robot2path;
+      tf2::fromMsg(transform_robot2path, tf2_transform_robot2path);
+      
+      tf2::Vector3 p(robot_current_pose.pose.position.x, robot_current_pose.pose.position.y, 0);
+      p = tf2_transform_robot2path * p;
+      robot_x = p.x();
+      robot_y = p.y();
+    } catch (tf2::TransformException & ex) {
+      RCLCPP_ERROR(
+        this->get_logger(),
+        "Could not transform %s to %s: %s",
+        robot_frame.c_str(), path_frame.c_str(), ex.what());
+      return -1;
+    }
+  }
+
   // 先找到和robot距离最近的点，作为起点
   // 避免因为robot移动了一段距离后，而plan未更新，导致robot返回起点
   int dist_min_path_index = 0;
@@ -632,8 +687,8 @@ int ControllerServer::FindPathIndex(const nav_msgs::msg::Path& current_path,
   for (size_t idx = 0; idx < current_path.poses.size(); idx++) {
     const auto& path_pose = current_path.poses.at(idx);
     // 计算robot和path之间的距离
-    float dist_robot_path = std::hypot(robot_current_pose.pose.position.x - path_pose.pose.position.x,
-                  robot_current_pose.pose.position.y - path_pose.pose.position.y);
+    float dist_robot_path = std::hypot(robot_x - path_pose.pose.position.x,
+                  robot_y - path_pose.pose.position.y);
     if (dist_robot_path < dist_min) {
       dist_min = dist_robot_path;
       dist_min_path_index = idx;
@@ -647,8 +702,8 @@ int ControllerServer::FindPathIndex(const nav_msgs::msg::Path& current_path,
   for (size_t idx = dist_min_path_index; idx < current_path.poses.size(); idx++) {
     const auto& path_pose = current_path.poses.at(idx);
     // 计算robot和path之间的距离
-    dist_robot_path = std::hypot(robot_current_pose.pose.position.x - path_pose.pose.position.x,
-                  robot_current_pose.pose.position.y - path_pose.pose.position.y);
+    dist_robot_path = std::hypot(robot_x - path_pose.pose.position.x,
+                  robot_y - path_pose.pose.position.y);
     if (dist_robot_path > dist_robot_path_thr) {
       path_index = idx;
       break;
@@ -661,60 +716,245 @@ int ControllerServer::FindPathIndex(const nav_msgs::msg::Path& current_path,
     return -1;
   }
 
-  RCLCPP_WARN(get_logger(), "Find the path point success, dist_min_path_index: %d, dist_min: %.2f, path_index: %d, dist_robot_path: %.2f, dist_robot_path_thr: %.2f",
+  RCLCPP_WARN(get_logger(), "Find the path point success, robot frame: %s, (%.2f, %.2f), dist_min_path_index: %d, dist_min: %.2f, path frame: %s, (%.2f, %.2f), index: %d, dist_robot_path: %.2f, dist_robot_path_thr: %.2f",
+    robot_current_pose.header.frame_id.c_str(),
+    robot_current_pose.pose.position.x, robot_current_pose.pose.position.y,
     dist_min_path_index, dist_min,
+    current_path.header.frame_id.c_str(),
+    current_path.poses.at(path_index).pose.position.x, current_path.poses.at(path_index).pose.position.y,
     static_cast<int>(path_index), dist_robot_path,
     dist_robot_path_thr
     );
   
-  ClearMarker();
-
-  {
-    // 发布找到的规划点
-    visualization_msgs::msg::MarkerArray marker_array;
-    auto marker = marker_;
-    int count = 0;
-    marker.header = current_path.header;
-    marker.id = count++;
-    marker.ns = "CUBE";
-    marker.pose.position.x = current_path.poses.at(path_index).pose.position.x;
-    marker.pose.position.y = current_path.poses.at(path_index).pose.position.y;
-    marker.action = visualization_msgs::msg::Marker::ADD;
-    marker_array.markers.push_back(marker);
-    if (marker_array.markers.size() > 0) {
-      dynamic_obstacle_markers_pub_->publish(std::move(marker_array));
-    }
-  }
+  // {
+  //   // 发布找到的规划点
+  //   visualization_msgs::msg::MarkerArray marker_array;
+  //   auto marker = marker_;
+  //   int count = 0;
+  //   marker.header = current_path.header;
+  //   marker.id = count++;
+  //   marker.ns = "CUBE";
+  //   marker.pose.position.x = current_path.poses.at(path_index).pose.position.x;
+  //   marker.pose.position.y = current_path.poses.at(path_index).pose.position.y;
+  //   marker.action = visualization_msgs::msg::Marker::ADD;
+  //   marker_array.markers.push_back(marker);
+  //   if (marker_array.markers.size() > 0) {
+  //     dynamic_obstacle_markers_pub_->publish(std::move(marker_array));
+  //   }
+  // }
 
   return static_cast<int>(path_index);
 }
 
-float ControllerServer::GetYawDiff(const geometry_msgs::msg::PoseStamped& path_pose) {
+bool ControllerServer::GetYawDiff(
+  const geometry_msgs::msg::PoseStamped& path_pose,
+  std::string path_frame, float& dyaw) {
   geometry_msgs::msg::PoseStamped robot_current_pose;
-  getRobotPose(robot_current_pose);
+  if (!getRobotPose(robot_current_pose)) {
+    RCLCPP_ERROR(get_logger(), "get robot pose failed");
+    return false;
+  }
 
-  std::string grid_frame = robot_current_pose.header.frame_id;
-  std::string nav2_costmap_global_frame_ = "base_link";
-  geometry_msgs::msg::Transform transform_grid2global =
-    tf_buffer_->lookupTransform(nav2_costmap_global_frame_, grid_frame,
-    robot_current_pose.header.stamp, tf2::durationFromSec(0.1)).transform;
-  // 将grid origin坐标转换成订阅到的nav2_costmap_global_frame_所在的坐标系
-  tf2::Transform tf2_transform;
-  tf2::fromMsg(transform_grid2global, tf2_transform);
-  
-  double yaw = tf2::getYaw(robot_current_pose.pose.orientation);
+  std::string robot_frame = robot_current_pose.header.frame_id;
+  std::string base_link_frame_id = "base_link";
+
+  tf2::Transform tf2_transform_robot2baselink;
+  tf2::Transform tf2_transform_path2baselink;
+  try {
+    geometry_msgs::msg::Transform transform_robot2baselink =
+      tf_buffer_->lookupTransform(base_link_frame_id, robot_frame,
+      robot_current_pose.header.stamp, tf2::durationFromSec(0.1)).transform;
+    tf2::fromMsg(transform_robot2baselink, tf2_transform_robot2baselink);
+    
+    geometry_msgs::msg::Transform transform_path2baselink =
+      tf_buffer_->lookupTransform(base_link_frame_id, path_frame,
+      path_pose.header.stamp, tf2::durationFromSec(0.1)).transform;
+    tf2::fromMsg(transform_path2baselink, tf2_transform_path2baselink);
+  } catch (tf2::TransformException& ex) {
+    RCLCPP_ERROR(this->get_logger(), "Can't transform %s or %s to %s: %s",
+      robot_frame.data(), path_frame.data(), base_link_frame_id.data(),ex.what());
+    return false;
+  }
 
   double robot_x;
   double robot_y;
   {
     tf2::Vector3 p(robot_current_pose.pose.position.x, robot_current_pose.pose.position.y, 0);
-    p = tf2_transform * p;
+    p = tf2_transform_robot2baselink * p;
     robot_x = p.x();
     robot_y = p.y();
   }
-  double robot_forward_x = robot_x + 1.0;
+  
+  double path_x = 0;
+  double path_y = 0;
+  {
+    tf2::Vector3 p(path_pose.pose.position.x, path_pose.pose.position.y, 0);
+    p = tf2_transform_path2baselink * p;
+    path_x = p.x();
+    path_y = p.y();
+  }
+
+  // 计算robot和path之间的距离
+  double step = std::hypot(robot_x - path_x, robot_y - path_y);
+  double robot_forward_x = robot_x + step;
   double robot_forward_y = robot_y;
 
+  dyaw = CalAngelOfTwoVector(robot_x, robot_y,
+                      robot_forward_x, robot_forward_y,
+                      path_x, path_y);
+
+  RCLCPP_INFO(get_logger(), "dyaw: %.2f, %d, robot at frame: %s, (%.2f, %.2f); frame: %s, (%.2f, %.2f), forward (%.2f, %.2f), path (%.2f, %.2f); path at frame: %s, (%.2f, %.2f)",
+    dyaw, static_cast<int>(dyaw * 180.0 / 3.14159),
+    robot_current_pose.header.frame_id.data(), robot_current_pose.pose.position.x, robot_current_pose.pose.position.y,
+    base_link_frame_id.data(),
+    robot_x, robot_y, robot_forward_x, robot_forward_y, path_x, path_y,
+    path_frame.data(), path_pose.pose.position.x, path_pose.pose.position.y
+    );
+    
+  // 发布用于计算的三个点
+  if (dynamic_obstacle_markers_pub_)
+  {
+    visualization_msgs::msg::MarkerArray marker_array;
+    int count = 0;
+    auto marker = marker_;
+    marker.type = visualization_msgs::msg::Marker::SPHERE;
+    marker.action = visualization_msgs::msg::Marker::ADD;
+    marker.ns = "ManualControl";
+    marker.scale.x = 0.1;
+    marker.scale.y = 0.1;
+    marker.scale.z = 0.01;
+    marker.header = robot_current_pose.header;
+
+    // {
+    //   // 原始坐标系下的规划点
+    //   marker.header.frame_id = path_frame;
+    //   marker.color.r = 1.0;
+    //   marker.color.g = 1.0;
+    //   marker.color.b = 1.0;
+    //   marker.color.a = 1.0;
+    //   marker.id = count++;
+    //   marker.pose.position.x = path_pose.pose.position.x;
+    //   marker.pose.position.y = path_pose.pose.position.y;
+    //   marker_array.markers.push_back(marker);
+    // }
+
+    marker.header.frame_id = base_link_frame_id;
+    {
+      // robot
+      marker.color.r = 1.0;
+      marker.color.g = 0.0;
+      marker.color.b = 0.0;
+      marker.color.a = 1.0;
+      marker.id = count++;
+      marker.pose.position.x = robot_x;
+      marker.pose.position.y = robot_y;
+      marker_array.markers.push_back(marker);
+    }
+    {
+      // robot正前方点
+      marker.color.r = 0.0;
+      marker.color.g = 1.0;
+      marker.color.b = 0.0;
+      marker.color.a = 1.0;
+      marker.id = count++;
+      marker.pose.position.x = robot_forward_x;
+      marker.pose.position.y = robot_forward_y;
+      marker_array.markers.push_back(marker);
+    }
+    {
+      // 规划点
+      marker.color.r = 0.0;
+      marker.color.g = 0.0;
+      marker.color.b = 1.0;
+      marker.color.a = 1.0;
+      marker.id = count++;
+      marker.pose.position.x = path_x;
+      marker.pose.position.y = path_y;
+      marker_array.markers.push_back(marker);
+    }
+    if (marker_array.markers.size() > 0) {
+      dynamic_obstacle_markers_pub_->publish(std::move(marker_array));
+    }
+  }
+
+
+  return true;
+}
+
+bool ControllerServer::CheckPathValid(const nav_msgs::msg::Path& path, int path_index) {
+  nav2_costmap_2d::Costmap2D * costmap_ = costmap_ros_->getCostmap();
+  if (!costmap_) return false;
+  unsigned int cell_x, cell_y;
+  for (size_t idx = 0; idx < path.poses.size(); idx++) {
+    const auto& pose = path.poses.at(idx);
+    if (path_index > 0 && static_cast<int>(idx) >= path_index) {
+      break;
+    }
+
+    if (!costmap_->worldToMap(pose.pose.position.x, pose.pose.position.y, cell_x, cell_y)) {
+      RCLCPP_WARN(get_logger(), "Gloabl plan at (%.2f, %.2f) is outside of grid.",
+        pose.pose.position.x, pose.pose.position.y);
+      continue;
+    }
+    unsigned char cost = costmap_->getCost(cell_x, cell_y);
+    // TODO
+    // 卡个阈值？
+    if (cost == nav2_costmap_2d::LETHAL_OBSTACLE
+    //  || cost == nav2_costmap_2d::INSCRIBED_INFLATED_OBSTACLE
+     ) {
+      RCLCPP_WARN(get_logger(), "Global plan at (%.2f, %.2f) is in an obstacle, cost %d.",
+        pose.pose.position.x, pose.pose.position.y, cost);
+      // 发布marker
+      if (dynamic_obstacle_markers_pub_) {
+        visualization_msgs::msg::MarkerArray marker_array;
+        auto marker = marker_;
+        marker.type = visualization_msgs::msg::Marker::CUBE;
+        marker.action = visualization_msgs::msg::Marker::ADD;
+        marker.ns = "CUBE";
+        marker.scale.x = 0.1;
+        marker.scale.y = 0.1;
+        marker.scale.z = 0.01;
+        marker.header = path.header;
+        marker.color.r = 1.0;
+        marker.color.g = 0.0;
+        marker.color.b = 0.0;
+        marker.color.a = 1.0;
+        marker.id = 0;
+        marker.pose.position.x = pose.pose.position.x;
+        marker.pose.position.y = pose.pose.position.y;
+        marker.lifetime.sec = 3.0;
+        marker.lifetime.nanosec = 0.0;
+        marker_array.markers.push_back(marker);
+        dynamic_obstacle_markers_pub_->publish(std::move(marker_array));
+      }
+      return false;
+    }
+  }
+
+  return true;
+}
+
+void ControllerServer::VisualizeGlobalPath() {
+  // 最新的路径规划
+  nav_msgs::msg::Path current_path;
+  {
+    std::lock_guard<std::mutex> lock(global_path_mutex_);
+    // current_path = recved_global_path_;
+    current_path = current_path_;
+  }
+  if (current_path.poses.empty()) {
+    return;
+  }
+  
+  std::string path_frame = current_path.header.frame_id;
+  std::string base_link_frame_id = "base_link";
+  geometry_msgs::msg::Transform transform_path2baselink =
+    tf_buffer_->lookupTransform(base_link_frame_id, path_frame,
+    current_path.header.stamp, tf2::durationFromSec(0.1)).transform;
+  tf2::Transform tf2_transform;
+  tf2::fromMsg(transform_path2baselink, tf2_transform);
+  
+  auto path_pose = current_path.poses.at(current_path.poses.size() / 2);
   double path_x = 0;
   double path_y = 0;
   {
@@ -724,22 +964,44 @@ float ControllerServer::GetYawDiff(const geometry_msgs::msg::PoseStamped& path_p
     path_y = p.y();
   }
 
-  // 以 (robot_forward_x, robot_forward_y) 为中心，计算 (robot_x, robot_y) 和 (path_x, path_y) 之间的夹角
-  // float dyaw = CalAngelOfTwoVector(cv::Point2f(robot_x, robot_y),
-  //   cv::Point2f(robot_forward_x, robot_forward_y),
-  //   cv::Point2f(path_x, path_y), true);
-    
-  float dyaw = CalAngelOfTwoVector(robot_x, robot_y,
-                      robot_forward_x, robot_forward_y,
-                      path_x, path_y);
-
-  RCLCPP_INFO(get_logger(), "dyaw: %.2f, %d, robot yaw: %.2f, %d, (%.2f, %.2f), (%.2f, %.2f), (%.2f, %.2f)",
-    dyaw, static_cast<int>(dyaw * 180.0 / 3.14159),
-    yaw, static_cast<int>(yaw * 180.0 / 3.14159),
-    robot_x, robot_y, robot_forward_x, robot_forward_y, path_x, path_y
-    );
-
-  return dyaw;
+  if (dynamic_obstacle_markers_pub_)
+  {
+    // 发布找到的规划点
+    visualization_msgs::msg::MarkerArray marker_array;
+    int count = 0;
+    auto marker = marker_;
+    marker.type = visualization_msgs::msg::Marker::SPHERE;
+    marker.scale.x = 0.1;
+    marker.scale.y = 0.1;
+    marker.scale.z = 0.01;
+    marker.header = current_path.header;
+    marker.ns = "VisualizeGlobalPath";
+    marker.action = visualization_msgs::msg::Marker::ADD;
+    {
+      marker.color.r = 1.0;
+      marker.color.g = 0.0;
+      marker.color.b = 0.0;
+      marker.color.a = 1.0;
+      marker.id = count++;
+      marker.pose.position.x = path_pose.pose.position.x;
+      marker.pose.position.y = path_pose.pose.position.y;
+      marker_array.markers.push_back(marker);
+    }
+    {
+      marker.header.frame_id = base_link_frame_id;
+      marker.color.r = 0.0;
+      marker.color.g = 1.0;
+      marker.color.b = 0.0;
+      marker.color.a = 1.0;
+      marker.id = count++;
+      marker.pose.position.x = path_x;
+      marker.pose.position.y = path_y;
+      marker_array.markers.push_back(marker);
+    }
+    if (marker_array.markers.size() > 0) {
+      dynamic_obstacle_markers_pub_->publish(std::move(marker_array));
+    }
+  }
 }
 
 // 
@@ -759,8 +1021,6 @@ bool ControllerServer::RotateAndMove(float yaw_goal_tolerance, float stop_dist_t
     RCLCPP_ERROR(get_logger(), "find path index fail");
     return false;
   }
-
-  // TODO 从障碍物少的一侧旋转
 
   float rotate_z = 0.8;
   geometry_msgs::msg::TwistStamped cmd_vel_2d;
@@ -782,7 +1042,7 @@ bool ControllerServer::RotateAndMove(float yaw_goal_tolerance, float stop_dist_t
     // 计算robot和path之间的距离
     float dist = std::hypot(robot_current_pose.pose.position.x - dest_pose.pose.position.x,
                   robot_current_pose.pose.position.y - dest_pose.pose.position.y);
-    RCLCPP_INFO(get_logger(), "robot pose frame_id: %s, (%.2f, %.2f), ts: %d.%d, path (%.2f, %.2f), dist: %.2f",
+    RCLCPP_INFO(get_logger(), "robot pose frame_id: %s, (%.2f, %.2f), ts: %d.%d, dest (%.2f, %.2f), dist: %.2f",
       robot_current_pose.header.frame_id.data(),
       robot_current_pose.pose.position.x, robot_current_pose.pose.position.y,
       robot_current_pose.header.stamp.sec, robot_current_pose.header.stamp.nanosec,
@@ -799,12 +1059,15 @@ bool ControllerServer::RotateAndMove(float yaw_goal_tolerance, float stop_dist_t
   std::shared_ptr<geometry_msgs::msg::PoseStamped> sp_start_robot_pose = nullptr;
   while (rclcpp::ok()) {
     if (this->now() - time_start > std::chrono::seconds(5)) {
-      RCLCPP_WARN(this->get_logger(), "move timeout");
+      RCLCPP_WARN(this->get_logger(), "move timeout: %f sec", (this->now() - time_start).seconds());
       publishZeroVelocity();
       break;
     }
     // 检查是否有新的 path
-    if (IsGlobalPathUpdated()) {
+    // if (IsGlobalPathUpdated()) 
+    // 不检查更新，避免线程安全问题
+    if (0)
+    {
       nav_msgs::msg::Path old_path;
 
       {
@@ -830,16 +1093,22 @@ bool ControllerServer::RotateAndMove(float yaw_goal_tolerance, float stop_dist_t
       }
     }
 
-    float dyaw = GetYawDiff(current_path.poses.at(path_index));
+    float dyaw;
+    if (!GetYawDiff(current_path.poses.at(path_index), current_path.header.frame_id, dyaw)) {
+      return false;
+    }
     // 将逆时针弧度转成最小弧度夹角
     float yaw_absolute = dyaw;
     if (dyaw > 3.14159) {
       yaw_absolute = 2 * 3.14159 - dyaw;
     }
-    RCLCPP_INFO(get_logger(), "yaw_absolute: %.2f, %d, yaw_goal_tolerance: %.2f, %d",
+    // 如果robot和目标位置距离很近，不需要再rotate
+    float dist_robot_to_path = get_distance(current_path.poses.at(path_index));
+    RCLCPP_INFO(get_logger(), "yaw_absolute: %.2f, %d, yaw_goal_tolerance: %.2f, %d, dist_robot_to_path: %.2f",
       yaw_absolute, static_cast<int>(yaw_absolute * 180.0 / 3.14159),
-      yaw_goal_tolerance, static_cast<int>(yaw_goal_tolerance * 180.0 / 3.14159));
-    if (yaw_absolute < yaw_goal_tolerance) {
+      yaw_goal_tolerance, static_cast<int>(yaw_goal_tolerance * 180.0 / 3.14159),
+      dist_robot_to_path);
+    if (yaw_absolute < yaw_goal_tolerance || dist_robot_to_path < 0.1) {
       RCLCPP_INFO(get_logger(), "do not need to rotate");
     } else {
       cmd_vel_2d.twist.linear.x = 0;
@@ -874,8 +1143,11 @@ bool ControllerServer::RotateAndMove(float yaw_goal_tolerance, float stop_dist_t
     // 运行到这里说明角度小于阈值
 
     // 移动
-    // TODO 判断前方是否有障碍物
     // 计算每个规划点对应cell的cost，判断是否为有效路径
+    if (!CheckPathValid(current_path, path_index * 2)) {
+      RCLCPP_ERROR(get_logger(), "path is not valid, which is in obstacle");
+      return false;
+    }
     if (!sp_start_robot_pose) {
       // 设置平移起点
       sp_start_robot_pose = std::make_shared<geometry_msgs::msg::PoseStamped>();
@@ -893,8 +1165,10 @@ bool ControllerServer::RotateAndMove(float yaw_goal_tolerance, float stop_dist_t
       // 计算失败
       return false;
     }
-    RCLCPP_INFO(get_logger(), "dist_robot_to_start: %.2f, stop_dist_thr: %.2f",
+    RCLCPP_INFO(get_logger(),
+      "dist_robot_to_start: %.2f, stop_dist_thr: %.2f",
       dist_robot_to_start, stop_dist_thr);
+
     if (dist_robot_to_start >= stop_dist_thr) {
       // 移动了足够远的距离，停止
       RCLCPP_INFO(get_logger(), "no need to move");
@@ -922,7 +1196,10 @@ bool ControllerServer::RotateAndMove(float yaw_goal_tolerance, float stop_dist_t
     }
   }
 
-  float dyaw = GetYawDiff(current_path.poses.at(path_index));
+  float dyaw;
+  if (!GetYawDiff(current_path.poses.at(path_index), current_path.header.frame_id, dyaw)) {
+    return false;
+  }
   float dist_robot_to_start = -1;
   if (sp_start_robot_pose) {
     dist_robot_to_start = get_distance(*sp_start_robot_pose);
@@ -1015,12 +1292,17 @@ void ControllerServer::computeAndPublishVelocity()
     nav2_util::geometry_utils::calculate_path_length(current_path_, find_closest_pose_idx());
   action_server_->publish_feedback(feedback);
 
-  RCLCPP_INFO(get_logger(), "Publishing velocity at time %.2f", now().seconds());
+  RCLCPP_DEBUG(get_logger(), "Publishing velocity at time %.2f", now().seconds());
   publishVelocity(cmd_vel_2d);
 }
 
 void ControllerServer::updateGlobalPath()
 {
+  if (!action_server_) {
+    RCLCPP_ERROR(get_logger(), "Action server is invalid");
+    return;
+  }
+
   if (action_server_->is_preempt_requested()) {
     RCLCPP_INFO(get_logger(), "Passing new path to controller.");
     auto goal = action_server_->accept_pending_goal();
@@ -1053,7 +1335,7 @@ void ControllerServer::publishVelocity(const geometry_msgs::msg::TwistStamped & 
   auto cmd_vel = std::make_unique<geometry_msgs::msg::Twist>(velocity.twist);
   if (vel_publisher_->is_activated() && vel_publisher_->get_subscription_count() > 0) {
     
-    RCLCPP_INFO(get_logger(), "publish Velocity x: %.2f, z: %.2f", cmd_vel->linear.x, cmd_vel->angular.z);
+    RCLCPP_DEBUG(get_logger(), "publish Velocity x: %.2f, z: %.2f", cmd_vel->linear.x, cmd_vel->angular.z);
     vel_publisher_->publish(std::move(cmd_vel));
   }
 }
