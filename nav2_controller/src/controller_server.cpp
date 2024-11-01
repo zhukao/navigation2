@@ -514,7 +514,7 @@ void ControllerServer::computeControl()
         }
         if (NavState::TAKE_OVER_GOING == nav_state) {
           // 正在接管中
-          if (this->now() - start_takeover_time > std::chrono::seconds(5)) {
+          if (this->now() - start_takeover_time > std::chrono::seconds(8)) {
             // 接管超时
             RCLCPP_WARN(this->get_logger(), "take over timeout: %f sec",
               (this->now() - start_takeover_time).seconds());
@@ -539,6 +539,7 @@ void ControllerServer::computeControl()
             continue;
           } else {
             // 停止接管
+            RCLCPP_WARN(this->get_logger(), "take over completed");
             ClearMarker("TakeOver");
             std::unique_lock<std::mutex> lock(mtx_nav_state_);
             nav_state_ = NavState::TAKE_OVER_SUCCED;
@@ -728,7 +729,7 @@ int ControllerServer::FindPathIndex(const nav_msgs::msg::Path& current_path,
 
   last_recved_global_path_sec_ = current_path.header.stamp.sec;
 
-  RCLCPP_INFO(get_logger(), "robot pose ts: %d.%d, current_path ts: %d.%d",
+  RCLCPP_DEBUG(get_logger(), "robot pose ts: %d.%d, current_path ts: %d.%d",
     robot_current_pose.header.stamp.sec, robot_current_pose.header.stamp.nanosec,
     current_path.header.stamp.sec, current_path.header.stamp.nanosec
     );
@@ -794,7 +795,7 @@ int ControllerServer::FindPathIndex(const nav_msgs::msg::Path& current_path,
     return -1;
   }
 
-  RCLCPP_WARN(get_logger(), "Find the path point success, robot frame: %s, (%.2f, %.2f), dist_min_path_index: %d, dist_min: %.2f, path frame: %s, (%.2f, %.2f), index: %d, dist_robot_path: %.2f, dist_robot_path_thr: %.2f",
+  RCLCPP_DEBUG(get_logger(), "Find the path point success, robot frame: %s, (%.2f, %.2f), dist_min_path_index: %d, dist_min: %.2f, path frame: %s, (%.2f, %.2f), index: %d, dist_robot_path: %.2f, dist_robot_path_thr: %.2f",
     robot_current_pose.header.frame_id.c_str(),
     robot_current_pose.pose.position.x, robot_current_pose.pose.position.y,
     dist_min_path_index, dist_min,
@@ -881,7 +882,7 @@ bool ControllerServer::GetYawDiff(
                       robot_forward_x, robot_forward_y,
                       path_x, path_y);
 
-  RCLCPP_INFO(get_logger(), "dyaw: %.2f, %d, robot at frame: %s, (%.2f, %.2f); frame: %s, (%.2f, %.2f), forward (%.2f, %.2f), path (%.2f, %.2f); path at frame: %s, (%.2f, %.2f)",
+  RCLCPP_DEBUG(get_logger(), "dyaw: %.2f, %d, robot at frame: %s, (%.2f, %.2f); frame: %s, (%.2f, %.2f), forward (%.2f, %.2f), path (%.2f, %.2f); path at frame: %s, (%.2f, %.2f)",
     dyaw, static_cast<int>(dyaw * 180.0 / 3.14159),
     robot_current_pose.header.frame_id.data(), robot_current_pose.pose.position.x, robot_current_pose.pose.position.y,
     base_link_frame_id.data(),
@@ -1120,7 +1121,7 @@ bool ControllerServer::RotateAndMoveOnce(float yaw_goal_tolerance, float stop_di
     // 计算robot和path之间的距离
     float dist = std::hypot(robot_current_pose.pose.position.x - dest_pose.pose.position.x,
                   robot_current_pose.pose.position.y - dest_pose.pose.position.y);
-    RCLCPP_INFO(get_logger(), "robot pose frame_id: %s, (%.2f, %.2f), ts: %d.%d, dest (%.2f, %.2f), dist: %.2f",
+    RCLCPP_DEBUG(get_logger(), "robot pose frame_id: %s, (%.2f, %.2f), ts: %d.%d, dest (%.2f, %.2f), dist: %.2f",
       robot_current_pose.header.frame_id.data(),
       robot_current_pose.pose.position.x, robot_current_pose.pose.position.y,
       robot_current_pose.header.stamp.sec, robot_current_pose.header.stamp.nanosec,
@@ -1143,7 +1144,7 @@ bool ControllerServer::RotateAndMoveOnce(float yaw_goal_tolerance, float stop_di
 
   if (!sp_start_robot_pose) {
     // 设置平移起点
-    RCLCPP_WARN(get_logger(), "set sp_start_robot_pose");
+    RCLCPP_INFO(get_logger(), "set sp_start_robot_pose");
     sp_start_robot_pose = std::make_shared<geometry_msgs::msg::PoseStamped>();
     geometry_msgs::msg::PoseStamped robot_current_pose;
     if (getRobotPose(robot_current_pose)) {
@@ -1158,11 +1159,14 @@ bool ControllerServer::RotateAndMoveOnce(float yaw_goal_tolerance, float stop_di
     // 计算失败
     return false;
   }
-  RCLCPP_INFO(get_logger(),
+  RCLCPP_DEBUG(get_logger(),
     "dist_robot_to_start: %.2f, stop_dist_thr: %.2f",
     dist_robot_to_start, stop_dist_thr);
   if (dist_robot_to_start >= stop_dist_thr) {
     // 移动了足够远的距离，停止
+    RCLCPP_INFO(get_logger(),
+      "dist_robot_to_start: %.2f, stop_dist_thr: %.2f",
+      dist_robot_to_start, stop_dist_thr);
     RCLCPP_INFO(get_logger(), "no need to move");
     // 不需要旋转和平移，继续跑轨迹规划
     publishZeroVelocity();
@@ -1180,12 +1184,12 @@ bool ControllerServer::RotateAndMoveOnce(float yaw_goal_tolerance, float stop_di
   }
   // 如果robot和目标位置距离很近，不需要再rotate
   float dist_robot_to_path = get_distance(current_path.poses.at(path_index));
-  RCLCPP_INFO(get_logger(), "yaw_absolute: %.2f, %d, yaw_goal_tolerance: %.2f, %d, dist_robot_to_path: %.2f",
+  RCLCPP_DEBUG(get_logger(), "yaw_absolute: %.2f, %d, yaw_goal_tolerance: %.2f, %d, dist_robot_to_path: %.2f",
     yaw_absolute, static_cast<int>(yaw_absolute * 180.0 / 3.14159),
     yaw_goal_tolerance, static_cast<int>(yaw_goal_tolerance * 180.0 / 3.14159),
     dist_robot_to_path);
   if (yaw_absolute < yaw_goal_tolerance || dist_robot_to_path < 0.1) {
-    RCLCPP_INFO(get_logger(), "do not need to rotate");
+    RCLCPP_DEBUG(get_logger(), "do not need to rotate");
   } else {
     cmd_vel_2d.twist.linear.x = 0;
     cmd_vel_2d.twist.linear.y = 0;
@@ -1195,11 +1199,11 @@ bool ControllerServer::RotateAndMoveOnce(float yaw_goal_tolerance, float stop_di
     if (dyaw < 3.14159) {
       // 逆时针旋转
       cmd_vel_2d.twist.angular.z = (1.0) * rotate_z;
-      RCLCPP_INFO(get_logger(), "rotate anti-clockwise");
+      RCLCPP_DEBUG(get_logger(), "rotate anti-clockwise");
     } else {
       // 顺时针旋转
       cmd_vel_2d.twist.angular.z = (-1.0) * rotate_z;
-      RCLCPP_INFO(get_logger(), "rotate clockwise");
+      RCLCPP_DEBUG(get_logger(), "rotate clockwise");
     }
 
     // 如果角度很小，减小旋转速度
@@ -1235,18 +1239,24 @@ bool ControllerServer::RotateAndMoveOnce(float yaw_goal_tolerance, float stop_di
     // 计算失败
     return false;
   }
-  RCLCPP_INFO(get_logger(),
+  RCLCPP_DEBUG(get_logger(),
     "dist_robot_to_start: %.2f, stop_dist_thr: %.2f",
     dist_robot_to_start, stop_dist_thr);
 
   if (dist_robot_to_start >= stop_dist_thr) {
     // 移动了足够远的距离，停止
+    RCLCPP_INFO(get_logger(),
+      "yaw_absolute: %.2f, %d, yaw_goal_tolerance: %.2f, %d, dist_robot_to_start: %.2f, stop_dist_thr: %.2f",
+      yaw_absolute, static_cast<int>(yaw_absolute * 180.0 / 3.14159),
+      yaw_goal_tolerance, static_cast<int>(yaw_goal_tolerance * 180.0 / 3.14159),
+      dist_robot_to_start, stop_dist_thr);
+
     RCLCPP_INFO(get_logger(), "no need to move");
     // 不需要旋转和平移，继续跑轨迹规划
     publishZeroVelocity();
     return false;
   } else {
-    RCLCPP_INFO(get_logger(), "do move");
+    RCLCPP_DEBUG(get_logger(), "do move");
     cmd_vel_2d.twist.linear.x = 0.2;
     cmd_vel_2d.twist.linear.y = 0;
     cmd_vel_2d.twist.linear.z = 0;
@@ -1482,7 +1492,7 @@ bool ControllerServer::RotateAndMove(float yaw_goal_tolerance, float stop_dist_t
   if (sp_start_robot_pose) {
     dist_robot_to_start = get_distance(*sp_start_robot_pose);
   }
-  RCLCPP_WARN(get_logger(), "after rotate and move, dyaw: %.2f, %d, dist_robot_to_start: %.2f",
+  RCLCPP_DEBUG(get_logger(), "after rotate and move, dyaw: %.2f, %d, dist_robot_to_start: %.2f",
     dyaw, static_cast<int>(dyaw * 180.0 / 3.14159), dist_robot_to_start);
   publishZeroVelocity();
 
