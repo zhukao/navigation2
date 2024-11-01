@@ -294,6 +294,9 @@ protected:
   // 有执行Rotate/Move就返回true
   void ClearMarker(std::string ns);
   bool RotateAndMove(float yaw_goal_tolerance, float stop_dist_robot_path_thr);
+  bool RotateAndMoveOnce(float yaw_goal_tolerance, float stop_dist_robot_path_thr,
+    std::shared_ptr<geometry_msgs::msg::PoseStamped>& sp_start_robot_pose);
+
   int FindPathIndex(const nav_msgs::msg::Path& current_path, float dist_robot_path_thr);
   // 获取robot最新的pose，计算robot逆时针旋转到输入的path_pose的弧度
   // 成功返回true，以及计算出来的dyaw

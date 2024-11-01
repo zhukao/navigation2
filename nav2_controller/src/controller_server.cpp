@@ -475,6 +475,8 @@ void ControllerServer::computeControl()
 
     last_valid_cmd_time_ = now();
     rclcpp::WallRate loop_rate(controller_frequency_);
+    auto start_takeover_time = this->now();
+    std::shared_ptr<geometry_msgs::msg::PoseStamped> sp_start_robot_pose = nullptr;
     while (rclcpp::ok()) {
       if (action_server_ == nullptr || !action_server_->is_server_active()) {
         RCLCPP_DEBUG(get_logger(), "Action server unavailable or inactive. Stopping.");
@@ -497,46 +499,101 @@ void ControllerServer::computeControl()
       updateGlobalPath();
         
       {
-        std::unique_lock<std::mutex> lock(mtx_nav_state_);
-        if (NavState::TAKE_OVER_GOING == nav_state_) {
+        // 同步接管
+        NavState nav_state;
+        {
+          std::unique_lock<std::mutex> lock(mtx_nav_state_);
+          if (NavState::NAV_CHECK_FAILED == nav_state_) {
+            // 开始接管
+            nav_state_ = NavState::TAKE_OVER_GOING;
+            sp_start_robot_pose = nullptr;
+            start_takeover_time = this->now();
+            RCLCPP_WARN(this->get_logger(), "start taking over");
+          }
+          nav_state = nav_state_;
+        }
+        if (NavState::TAKE_OVER_GOING == nav_state) {
           // 正在接管中
-          continue;
-        } else if (NavState::NAV_CHECK_FAILED == nav_state_) {
-          // 创建接管任务
-          std::unique_lock<std::mutex> lock(take_over_mutex_);
-          RCLCPP_WARN(get_logger(), "create take_over task");
-          if (sp_take_over_thread_ && sp_take_over_thread_->joinable()) {
-            // 等待上次接管完成
-            RCLCPP_WARN(get_logger(), "waiting for take_over task to finish");
-            sp_take_over_thread_->join();
-            sp_take_over_thread_.reset();
-            sp_take_over_thread_ = nullptr;
-            RCLCPP_WARN(get_logger(), "take_over task is exited");
+          if (this->now() - start_takeover_time > std::chrono::seconds(5)) {
+            // 接管超时
+            RCLCPP_WARN(this->get_logger(), "take over timeout: %f sec",
+              (this->now() - start_takeover_time).seconds());
+            publishZeroVelocity();
+            // 停止接管
+            ClearMarker("TakeOver");
+            std::unique_lock<std::mutex> lock(mtx_nav_state_);
+            nav_state_ = NavState::TAKE_OVER_FAILED;
+            sp_start_robot_pose = nullptr;
+            continue;
           }
 
-          // 进入接管状态
-          nav_state_ = NavState::TAKE_OVER_GOING;
-          
-          sp_take_over_thread_ = std::make_shared<std::thread>([this]() {
-            RCLCPP_WARN(get_logger(), "take_over task start");
-            bool take_over_success = RotateAndMove(3.1415 / 180.0 * 10.0, 0.3);
+          bool take_over_continue = RotateAndMoveOnce(3.1415 / 180.0 * 10.0, 0.3, sp_start_robot_pose);
+          // 返回true表示需要继续接管
+          if (take_over_continue) {
+            // if (!loop_rate.sleep()) {
+            //   RCLCPP_WARN(
+            //     get_logger(), "Control loop missed its desired rate of %.4fHz",
+            //     controller_frequency_);
+            // }
+            rclcpp::sleep_for(std::chrono::milliseconds(30));
+            continue;
+          } else {
+            // 停止接管
             ClearMarker("TakeOver");
-            RCLCPP_WARN(get_logger(), "take_over task done");
-            
-            {
-              std::unique_lock<std::mutex> lock(mtx_nav_state_);
-              if (nav_state_ == NavState::TAKE_OVER_GOING) {
-                if (take_over_success) {
-                  nav_state_ = NavState::TAKE_OVER_SUCCED;
-                } else {
-                  nav_state_ = NavState::TAKE_OVER_FAILED;
-                }
-              }
-            }
-          });
-          continue;
+            std::unique_lock<std::mutex> lock(mtx_nav_state_);
+            nav_state_ = NavState::TAKE_OVER_SUCCED;
+            sp_start_robot_pose = nullptr;
+          }
         }
       }
+
+      // 异步接管
+      // {
+      //   std::unique_lock<std::mutex> lock(mtx_nav_state_);
+      //   if (NavState::TAKE_OVER_GOING == nav_state_) {
+      //     if (!loop_rate.sleep()) {
+      //       RCLCPP_WARN(
+      //         get_logger(), "Control loop missed its desired rate of %.4fHz",
+      //         controller_frequency_);
+      //     }
+      //     // 正在接管中
+      //     continue;
+      //   } else if (NavState::NAV_CHECK_FAILED == nav_state_) {
+      //     // 创建接管任务
+      //     std::unique_lock<std::mutex> lock(take_over_mutex_);
+      //     RCLCPP_WARN(get_logger(), "create take_over task");
+      //     if (sp_take_over_thread_ && sp_take_over_thread_->joinable()) {
+      //       // 等待上次接管完成
+      //       RCLCPP_WARN(get_logger(), "waiting for take_over task to finish");
+      //       sp_take_over_thread_->join();
+      //       sp_take_over_thread_.reset();
+      //       sp_take_over_thread_ = nullptr;
+      //       RCLCPP_WARN(get_logger(), "take_over task is exited");
+      //     }
+
+      //     // 进入接管状态
+      //     nav_state_ = NavState::TAKE_OVER_GOING;
+          
+      //     sp_take_over_thread_ = std::make_shared<std::thread>([this]() {
+      //       RCLCPP_WARN(get_logger(), "take_over task start");
+      //       bool take_over_success = RotateAndMove(3.1415 / 180.0 * 10.0, 0.3);
+      //       ClearMarker("TakeOver");
+      //       RCLCPP_WARN(get_logger(), "take_over task done");
+            
+      //       {
+      //         std::unique_lock<std::mutex> lock(mtx_nav_state_);
+      //         if (nav_state_ == NavState::TAKE_OVER_GOING) {
+      //           if (take_over_success) {
+      //             nav_state_ = NavState::TAKE_OVER_SUCCED;
+      //           } else {
+      //             nav_state_ = NavState::TAKE_OVER_FAILED;
+      //           }
+      //         }
+      //       }
+      //     });
+      //     continue;
+      //   }
+      // }
       
       // VisualizeGlobalPath();
       {
@@ -704,7 +761,7 @@ int ControllerServer::FindPathIndex(const nav_msgs::msg::Path& current_path,
   // 先找到和robot距离最近的点，作为起点
   // 避免因为robot移动了一段距离后，而plan未更新，导致robot返回起点
   int dist_min_path_index = 0;
-  float dist_min = 0;
+  float dist_min = std::numeric_limits<float>::max();
   for (size_t idx = 0; idx < current_path.poses.size(); idx++) {
     const auto& path_pose = current_path.poses.at(idx);
     // 计算robot和path之间的距离
@@ -1025,6 +1082,192 @@ void ControllerServer::VisualizeGlobalPath() {
   }
 }
 
+// 返回true表示需要继续接管
+bool ControllerServer::RotateAndMoveOnce(float yaw_goal_tolerance, float stop_dist_thr,
+  std::shared_ptr<geometry_msgs::msg::PoseStamped>& sp_start_robot_pose) {
+  // 最新的路径规划
+  nav_msgs::msg::Path current_path;
+  {
+    std::lock_guard<std::mutex> lock(global_path_mutex_);
+    current_path = current_path_;
+  }
+
+  // 寻找和robot距离为 dist_robot_path_thr 的最近路径规划点
+  float dist_robot_path_thr = stop_dist_thr;
+  int path_index = FindPathIndex(current_path, dist_robot_path_thr);
+  if (path_index < 0) {
+    RCLCPP_ERROR(get_logger(), "find path index fail");
+    return false;
+  }
+
+  float rotate_z = 0.8;
+  geometry_msgs::msg::TwistStamped cmd_vel_2d;
+  cmd_vel_2d.twist.angular.x = 0;
+  cmd_vel_2d.twist.angular.y = 0;
+  cmd_vel_2d.twist.angular.z = 0;
+  cmd_vel_2d.twist.linear.x = 0;
+  cmd_vel_2d.twist.linear.y = 0;
+  cmd_vel_2d.twist.linear.z = 0;
+  cmd_vel_2d.header = current_path.header;
+
+  auto get_distance = [this](geometry_msgs::msg::PoseStamped dest_pose)->float{
+    geometry_msgs::msg::PoseStamped robot_current_pose;
+    if (!getRobotPose(robot_current_pose)) {
+      RCLCPP_ERROR(get_logger(), "get robot pose failed");
+      return -1;
+    }
+
+    // 计算robot和path之间的距离
+    float dist = std::hypot(robot_current_pose.pose.position.x - dest_pose.pose.position.x,
+                  robot_current_pose.pose.position.y - dest_pose.pose.position.y);
+    RCLCPP_INFO(get_logger(), "robot pose frame_id: %s, (%.2f, %.2f), ts: %d.%d, dest (%.2f, %.2f), dist: %.2f",
+      robot_current_pose.header.frame_id.data(),
+      robot_current_pose.pose.position.x, robot_current_pose.pose.position.y,
+      robot_current_pose.header.stamp.sec, robot_current_pose.header.stamp.nanosec,
+      dest_pose.pose.position.x, dest_pose.pose.position.y,
+      dist
+      );
+      
+    return dist;
+  };
+    
+  {
+    std::unique_lock<std::mutex> lock(mtx_nav_state_);
+    if (nav_state_ != NavState::TAKE_OVER_GOING) {
+      RCLCPP_WARN(this->get_logger(), "nav state changed to %d, stop take-over task", static_cast<int>(nav_state_));
+      // 状态已经发生变化，停止接管
+      publishZeroVelocity();
+      return false;
+    }
+  }
+
+  if (!sp_start_robot_pose) {
+    // 设置平移起点
+    RCLCPP_WARN(get_logger(), "set sp_start_robot_pose");
+    sp_start_robot_pose = std::make_shared<geometry_msgs::msg::PoseStamped>();
+    geometry_msgs::msg::PoseStamped robot_current_pose;
+    if (getRobotPose(robot_current_pose)) {
+      *sp_start_robot_pose = robot_current_pose;
+    } else {
+      return false;
+    }
+  }
+  // 计算robot当前位置和移动前位置之间的距离
+  float dist_robot_to_start = get_distance(*sp_start_robot_pose);
+  if (dist_robot_to_start < 0) {
+    // 计算失败
+    return false;
+  }
+  RCLCPP_INFO(get_logger(),
+    "dist_robot_to_start: %.2f, stop_dist_thr: %.2f",
+    dist_robot_to_start, stop_dist_thr);
+  if (dist_robot_to_start >= stop_dist_thr) {
+    // 移动了足够远的距离，停止
+    RCLCPP_INFO(get_logger(), "no need to move");
+    // 不需要旋转和平移，继续跑轨迹规划
+    publishZeroVelocity();
+    return false;
+  }
+
+  float dyaw;
+  if (!GetYawDiff(current_path.poses.at(path_index), current_path.header.frame_id, dyaw)) {
+    return false;
+  }
+  // 将逆时针弧度转成最小弧度夹角
+  float yaw_absolute = dyaw;
+  if (dyaw > 3.14159) {
+    yaw_absolute = 2 * 3.14159 - dyaw;
+  }
+  // 如果robot和目标位置距离很近，不需要再rotate
+  float dist_robot_to_path = get_distance(current_path.poses.at(path_index));
+  RCLCPP_INFO(get_logger(), "yaw_absolute: %.2f, %d, yaw_goal_tolerance: %.2f, %d, dist_robot_to_path: %.2f",
+    yaw_absolute, static_cast<int>(yaw_absolute * 180.0 / 3.14159),
+    yaw_goal_tolerance, static_cast<int>(yaw_goal_tolerance * 180.0 / 3.14159),
+    dist_robot_to_path);
+  if (yaw_absolute < yaw_goal_tolerance || dist_robot_to_path < 0.1) {
+    RCLCPP_INFO(get_logger(), "do not need to rotate");
+  } else {
+    cmd_vel_2d.twist.linear.x = 0;
+    cmd_vel_2d.twist.linear.y = 0;
+    cmd_vel_2d.twist.linear.z = 0;
+    cmd_vel_2d.twist.angular.x = 0.0;
+    cmd_vel_2d.twist.angular.y = 0;
+    if (dyaw < 3.14159) {
+      // 逆时针旋转
+      cmd_vel_2d.twist.angular.z = (1.0) * rotate_z;
+      RCLCPP_INFO(get_logger(), "rotate anti-clockwise");
+    } else {
+      // 顺时针旋转
+      cmd_vel_2d.twist.angular.z = (-1.0) * rotate_z;
+      RCLCPP_INFO(get_logger(), "rotate clockwise");
+    }
+
+    // 如果角度很小，减小旋转速度
+    if (yaw_absolute < yaw_goal_tolerance * 2.0) {
+      // 转动了超过一半
+      cmd_vel_2d.twist.angular.z = cmd_vel_2d.twist.angular.z * 0.5;
+    }
+
+    publishVelocity(cmd_vel_2d);
+    std::shared_ptr<Action::Feedback> feedback = std::make_shared<Action::Feedback>();
+    feedback->speed = std::hypot(cmd_vel_2d.twist.linear.x, cmd_vel_2d.twist.linear.y);
+    action_server_->publish_feedback(feedback);
+
+    return true;
+    
+    // std::shared_ptr<Action::Feedback> feedback = std::make_shared<Action::Feedback>();
+    // feedback->speed = std::hypot(cmd_vel_2d.twist.linear.x, cmd_vel_2d.twist.linear.y);
+    // action_server_->publish_feedback(feedback);
+  }
+
+  // 运行到这里说明角度小于阈值
+
+  // 移动
+  // 计算每个规划点对应cell的cost，判断是否为有效路径
+  if (!CheckPathValid(current_path, path_index * 2)) {
+    RCLCPP_ERROR(get_logger(), "path is not valid, which is in obstacle");
+    return false;
+  }
+
+  // 计算robot当前位置和移动前位置之间的距离
+  dist_robot_to_start = get_distance(*sp_start_robot_pose);
+  if (dist_robot_to_start < 0) {
+    // 计算失败
+    return false;
+  }
+  RCLCPP_INFO(get_logger(),
+    "dist_robot_to_start: %.2f, stop_dist_thr: %.2f",
+    dist_robot_to_start, stop_dist_thr);
+
+  if (dist_robot_to_start >= stop_dist_thr) {
+    // 移动了足够远的距离，停止
+    RCLCPP_INFO(get_logger(), "no need to move");
+    // 不需要旋转和平移，继续跑轨迹规划
+    publishZeroVelocity();
+    return false;
+  } else {
+    RCLCPP_INFO(get_logger(), "do move");
+    cmd_vel_2d.twist.linear.x = 0.2;
+    cmd_vel_2d.twist.linear.y = 0;
+    cmd_vel_2d.twist.linear.z = 0;
+    cmd_vel_2d.twist.angular.x = 0.0;
+    cmd_vel_2d.twist.angular.y = 0;
+    cmd_vel_2d.twist.angular.z = 0;
+    if (dist_robot_to_start >= stop_dist_thr * 0.5) {
+      // 移动了超过一半
+      cmd_vel_2d.twist.linear.x = cmd_vel_2d.twist.linear.x * 0.5;
+    }
+
+    publishVelocity(cmd_vel_2d);
+    std::shared_ptr<Action::Feedback> feedback = std::make_shared<Action::Feedback>();
+    feedback->speed = std::hypot(cmd_vel_2d.twist.linear.x, cmd_vel_2d.twist.linear.y);
+    action_server_->publish_feedback(feedback);
+    return true;
+  }
+
+  return false;
+}
+
 // 
 bool ControllerServer::RotateAndMove(float yaw_goal_tolerance, float stop_dist_thr) {
   // 最新的路径规划
@@ -1248,7 +1491,7 @@ bool ControllerServer::RotateAndMove(float yaw_goal_tolerance, float stop_dist_t
 
 void ControllerServer::computeAndPublishVelocity()
 {
-  RCLCPP_INFO(get_logger(), "do compute And PublishVelocity");
+  RCLCPP_DEBUG(get_logger(), "do compute And PublishVelocity");
   geometry_msgs::msg::PoseStamped pose;
   
   if (!getRobotPose(pose)) {
@@ -1262,7 +1505,7 @@ void ControllerServer::computeAndPublishVelocity()
     failed_to_make_progress_count_++;
     RCLCPP_ERROR(get_logger(), "Failed to make progress, failed_to_make_progress_count_: %d",
       failed_to_make_progress_count_);
-    if (failed_to_make_progress_count_ >= 3) {
+    if (failed_to_make_progress_count_ > 3) {
       throw nav2_core::PlannerException("Failed to make progress");
     } else {
       std::unique_lock<std::mutex> lock(mtx_nav_state_);
@@ -1270,6 +1513,7 @@ void ControllerServer::computeAndPublishVelocity()
     }
     return;
   }
+  failed_to_make_progress_count_ = 0;
 
   nav_2d_msgs::msg::Twist2D twist = getThresholdedTwist(odom_sub_->getTwist());
 
