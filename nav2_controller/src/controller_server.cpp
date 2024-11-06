@@ -774,6 +774,9 @@ int ControllerServer::FindPathIndex(const nav_msgs::msg::Path& current_path,
     }
   }
 
+  // TODO
+  // 对 current_path 的时间戳和 dist_min 进行校验，如果大于阈值，说明是过期的路径规划
+
   // 找到第一个和robot之间距离超过阈值的规划点
   size_t path_index = dist_min_path_index;
   // robot和规划点之间的距离
@@ -978,6 +981,7 @@ bool ControllerServer::CheckPathValid(const nav_msgs::msg::Path& path, int path_
     unsigned char cost = costmap_->getCost(cell_x, cell_y);
     // TODO
     // 卡个阈值？
+    // 使用 CostmapTopicCollisionChecker 判断碰撞
     if (cost == nav2_costmap_2d::LETHAL_OBSTACLE
     //  || cost == nav2_costmap_2d::INSCRIBED_INFLATED_OBSTACLE
      ) {
@@ -1218,10 +1222,6 @@ bool ControllerServer::RotateAndMoveOnce(float yaw_goal_tolerance, float stop_di
     action_server_->publish_feedback(feedback);
 
     return true;
-    
-    // std::shared_ptr<Action::Feedback> feedback = std::make_shared<Action::Feedback>();
-    // feedback->speed = std::hypot(cmd_vel_2d.twist.linear.x, cmd_vel_2d.twist.linear.y);
-    // action_server_->publish_feedback(feedback);
   }
 
   // 运行到这里说明角度小于阈值
