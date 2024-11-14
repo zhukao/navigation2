@@ -20,7 +20,6 @@
 
 #include "follow_pose_core/follow_pose_planner.hpp"
 #include "follow_pose_core/exceptions.hpp"
-#include "follow_pose_core/illegal_trajectory_tracker.hpp"
 #include "nav_2d_msgs/msg/twist2_d.hpp"
 #include "nav_2d_utils/conversions.hpp"
 #include "nav_2d_utils/parameters.hpp"
