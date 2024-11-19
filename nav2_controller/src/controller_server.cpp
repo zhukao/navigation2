@@ -452,6 +452,7 @@ void ControllerServer::computeControl()
   auto start_time = this->now();
   try {
     std::string c_name = action_server_->get_current_goal()->controller_id;
+    RCLCPP_INFO(get_logger(), "Goal input controller: %s", c_name.c_str());
     std::string current_controller;
     if (findControllerId(c_name, current_controller)) {
       current_controller_ = current_controller;
@@ -459,8 +460,10 @@ void ControllerServer::computeControl()
       action_server_->terminate_current();
       return;
     }
+    RCLCPP_INFO(get_logger(), "Using controller: %s", current_controller_.c_str());
 
     std::string gc_name = action_server_->get_current_goal()->goal_checker_id;
+    RCLCPP_INFO(get_logger(), "Goal input goal checker: %s", gc_name.c_str());
     std::string current_goal_checker;
     if (findGoalCheckerId(gc_name, current_goal_checker)) {
       current_goal_checker_ = current_goal_checker;
@@ -468,6 +471,7 @@ void ControllerServer::computeControl()
       action_server_->terminate_current();
       return;
     }
+    RCLCPP_INFO(get_logger(), "Using goal checker: %s", current_goal_checker_.c_str());
 
     setPlannerPath(action_server_->get_current_goal()->path);
     progress_checker_->reset();
@@ -1509,6 +1513,9 @@ void ControllerServer::computeAndPublishVelocity()
   }
 
   if (!progress_checker_->check(pose)) {
+    // TODO
+    throw nav2_core::PlannerException("Failed to make progress");
+
     // 不抛异常
     // 此处抛异常会导致重新发起导航action请求
     // throw nav2_core::PlannerException("Failed to make progress");
